@@ -3445,6 +3445,69 @@ static Expr *generic_select(E *e, Scope *sc, Expr *ex) {
     return ex->extra->args.data[chosen];
 }
 
+static EVal emit_expr(E *e, Scope *sc, Expr *ex);
+
+static void emit_array_field_init(E *e, Scope *sc, MLIR_ValueHandle dst_ptr,
+                                  Type ft, Expr *ae) {
+    MLIR_TypeHandle arr_ty = array_mlir_type(e, &ft);
+    MLIR_TypeHandle elem_ty = array_elem_type(e, &ft);
+    if (ae->kind == EX_STR && ft.kind == TY_ARRAY_I32 &&
+        elem_ty == e->i8 && ft.array_len2 == 0) {
+        string lit = ae->name;
+        int64_t alen = ft.array_len;
+        if ((int64_t)lit.size > alen) {
+            EMIT_ERR(e, "string initializer ({} bytes) too long for char[{}]",
+                     (int64_t)lit.size, alen);
+        }
+        int64_t lim = (int64_t)lit.size < alen ? (int64_t)lit.size : alen;
+        for (int64_t k = 0; k < lim; k++) {
+            MLIR_ValueHandle bv = emit_const_narrow(e, (int64_t)(uint8_t)lit.str[k], e->i8);
+            int32_t path[2] = {0, (int32_t)k};
+            MLIR_ValueHandle ep = emit_gep(e, dst_ptr, arr_ty, path, 2, NULL, 0);
+            emit_store_v(e, bv, ep);
+        }
+        return;
+    }
+    if (ae->kind == EX_INT && ae->val.int_value == 0) {
+        return; // already zero-initialized
+    }
+    if (ae->kind != EX_COMPOUND) {
+        EMIT_ERR(e, "array field initializer must be a brace list or string literal");
+        return;
+    }
+    size_t n = ae->extra->args.size;
+    if (ft.array_len2 != 0) {
+        int64_t lim1 = (int64_t)n < ft.array_len ? (int64_t)n : ft.array_len;
+        for (int64_t a = 0; a < lim1; a++) {
+            Expr *row = ae->extra->args.data[a];
+            if (row->kind != EX_COMPOUND) continue;
+            size_t rn = row->extra->args.size;
+            int64_t lim2 = (int64_t)rn < ft.array_len2 ? (int64_t)rn : ft.array_len2;
+            for (int64_t b = 0; b < lim2; b++) {
+                EVal ev = emit_expr(e, sc, row->extra->args.data[b]);
+                MLIR_ValueHandle sv = (ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT)
+                    ? int_to_ptr(e, ev) : coerce_eval_to(e, ev, elem_ty, ft);
+                int32_t path[3] = {0, (int32_t)a, (int32_t)b};
+                MLIR_ValueHandle ep = emit_gep(e, dst_ptr, arr_ty, path, 3, NULL, 0);
+                emit_store_v(e, sv, ep);
+            }
+        }
+        return;
+    }
+    if ((int64_t)n > ft.array_len) {
+        EMIT_ERR(e, "too many initializers for array field");
+        n = (size_t)ft.array_len;
+    }
+    for (size_t k = 0; k < n; k++) {
+        EVal ev = emit_expr(e, sc, ae->extra->args.data[k]);
+        MLIR_ValueHandle sv = (ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT)
+            ? int_to_ptr(e, ev) : coerce_eval_to(e, ev, elem_ty, ft);
+        int32_t path[2] = {0, (int32_t)k};
+        MLIR_ValueHandle ep = emit_gep(e, dst_ptr, arr_ty, path, 2, NULL, 0);
+        emit_store_v(e, sv, ep);
+    }
+}
+
 static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
     EVal r = {0};
@@ -5454,6 +5517,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         }
                         continue;
                     }
+                    if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                        ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT) {
+                        emit_array_field_init(e, sc, p, ft, ex->extra->args.data[i]);
+                        continue;
+                    }
                     EVal v = emit_expr(e, sc, ex->extra->args.data[i]);
                     MLIR_TypeHandle want = scalar_mem_type(e, &ft);
                     MLIR_ValueHandle sv;
@@ -5755,6 +5823,10 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             if (st->extra && st->extra->decl_static_global_sym.size > 0) {
                 sy->is_global = true;
                 sy->global_sym = st->extra->decl_static_global_sym;
+                if (sy->type.kind == TY_STRUCT || sy->type.kind == TY_PTR_STRUCT ||
+                    sy->type.kind == TY_ARRAY_STRUCT) {
+                    sy->sdef = find_struct(e, sy->type.struct_name);
+                }
                 scope_add(e, sc, sy);
                 return;
             }
@@ -6123,6 +6195,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                         }
                                         continue;
                                     }
+                                    if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                                        ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT) {
+                                        emit_array_field_init(e, sc, pf, ft, fe);
+                                        continue;
+                                    }
                                     EVal v = emit_expr(e, sc, fe);
                                     MLIR_ValueHandle sv;
                                     if (ft.kind == TY_PTR_I32 ||
@@ -6158,6 +6235,15 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                                 "or struct value");
                                 }
                             }
+                        }
+                        // Zero-initialize any remaining unspecified elements (#306).
+                        for (int64_t k = (int64_t)n; k < alen; k++) {
+                            int32_t epath[2] = {0, (int32_t)k};
+                            MLIR_ValueHandle pelem = emit_gep(
+                                e, sy->addr, arr_ty, epath, 2, NULL, 0);
+                            int32_t *zprefix = arena_new_array(e->arena, int32_t, 1);
+                            zprefix[0] = 0;
+                            emit_struct_zero(e, pelem, st_ty, sd, zprefix, 1);
                         }
                     }
                 }
@@ -6267,6 +6353,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                                     "struct value");
                                     }
                                 }
+                                continue;
+                            }
+                            if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                                ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT) {
+                                emit_array_field_init(e, sc, p, ft, st->expr->extra->args.data[i]);
                                 continue;
                             }
                             EVal v = emit_expr(

@@ -1843,3 +1843,11 @@ name = "elf_setjmp_longjmp"
 targets = ["elf"]
 # __builtin_setjmp / __builtin_longjmp on x86_64/ELF (#337).
 expected_stdout = "first\ncaught 42\nzero-becomes 1\n"
+
+[[test]]
+name = "struct_init_and_fields"
+targets = ["native", "wasm", "macho", "elf"]
+# Fnptr+plain multi-decl field (#382), typedef'd struct-ptr & / ** (#366),
+# static local struct persistence (#313), partial array-of-structs zero-init
+# (#306), and nested brace array-field initializer (#307).
+expected_stdout = "1 41 42\n1 99\n93\n77\n1 4 0 0\n1 abc 10 30\n2 xy 6 0 0\n"

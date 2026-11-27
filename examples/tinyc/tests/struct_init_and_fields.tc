@@ -1,0 +1,66 @@
+extern int printf(const char *fmt, ...);
+
+// #382: struct F { int (*fn)(int), x; }
+struct FnAndInt { int (*fn)(int), x; };
+static int inc(int v) { return v + 1; }
+
+// #366: typedef'd struct-pointer with & and **
+struct OpImpl { int id; };
+typedef struct OpImpl *OpH;
+static int take_oph_pp(OpH **pph) { return (*pph != 0 && **pph != 0) ? (**pph)->id : -1; }
+
+// #313: static local struct persists across calls
+struct Counter { int n; int step; };
+static int bump_struct(void) {
+    static struct Counter c = {0, 3};
+    static struct Counter z;
+    c.n += c.step;
+    z.n++;
+    return c.n * 10 + z.n;
+}
+
+// #306: partial array-of-structs initializer zeros remaining elements
+struct Pair { int x, y; };
+static void dirty_stack(void) {
+    int j[16];
+    for (int i = 0; i < 16; i++) j[i] = 77;
+    printf("%d\n", j[3]);
+}
+static void test_partial_struct_array(void) {
+    struct Pair a[3] = {{1, 2}, {3, 4}};
+    printf("%d %d %d %d\n", a[0].x, a[1].y, a[2].x, a[2].y);
+}
+
+// #307: nested brace initializer for array field inside struct initializer
+struct Tagged { int n; char tag[4]; int vals[3]; };
+
+int main(void) {
+    // #382
+    struct FnAndInt f;
+    f.fn = inc;
+    f.x = 41;
+    printf("%d %d %d\n", (int)(sizeof(struct FnAndInt) == 2 * sizeof(void *)), f.x, f.fn(f.x));
+
+    // #366
+    struct OpImpl op = {99};
+    OpH h = &op;
+    OpH *ph = &h;
+    OpH **pph = &ph;
+    printf("%d %d\n", ph != 0, take_oph_pp(pph));
+
+    // #313
+    bump_struct();
+    bump_struct();
+    printf("%d\n", bump_struct());
+
+    // #306
+    dirty_stack();
+    test_partial_struct_array();
+
+    // #307
+    struct Tagged t = {1, {'a', 'b', 'c', 0}, {10, 20, 30}};
+    struct Tagged ta[2] = {{2, {'x', 'y', 0}, {5, 6}}};
+    printf("%d %s %d %d\n", t.n, t.tag, t.vals[0], t.vals[2]);
+    printf("%d %s %d %d %d\n", ta[0].n, ta[0].tag, ta[0].vals[1], ta[0].vals[2], ta[1].n);
+    return 0;
+}
