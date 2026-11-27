@@ -1824,3 +1824,10 @@ name = "global_ptr_aggregate_init"
 targets = ["native", "wasm", "macho", "elf"]
 # Non-null pointer relocations in global struct and pointer-array initializers (#317).
 expected_stdout = "abc 42 7\nStatic Heap Stack 3\n5012 1 +122\nfirst 42 second 20 1\n"
+
+[[test]]
+name = "declarators_339"
+targets = ["native", "wasm", "macho", "elf"]
+# Remaining #339 declarators: anonymous struct globals, function returning
+# fnptr, pointer to fn returning fnptr, and local/global arrays of fnptrs.
+expected_stdout = "10 10 11 12\nhello\nhello\n6 10\n"

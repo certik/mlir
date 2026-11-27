@@ -2017,15 +2017,30 @@ static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name) {
     // Consume `(`, `*`.
     p->i++;
     p->i++;
+    // Pointer to function returning function pointer: `void (*(*sym)(int))(void)`.
+    bool has_inner_fnptr = false;
+    Type inner_fn = {0};
+    if (cur(p).kind == TC_TK_LPAREN && peek(p, 1).kind == TC_TK_STAR) {
+        has_inner_fnptr = try_parse_fnptr_suffix(p, &inner_fn, out_name);
+    }
     // Optional second `*` for pointer-to-function-pointer: `int (**fp)(...)`.
     bool ptr_to_fnptr = false;
-    if (cur(p).kind == TC_TK_STAR) {
+    if (!has_inner_fnptr && cur(p).kind == TC_TK_STAR) {
         ptr_to_fnptr = true;
         p->i++;
     }
-    if (cur(p).kind == TC_TK_IDENT) {
+    skip_const(p);
+    if (!has_inner_fnptr && cur(p).kind == TC_TK_IDENT) {
         if (out_name) *out_name = tc_tok_text(cur(p));
         p->i++;
+    }
+    // Optional array suffix inside declarator: `int (*tab[N])(int)`.
+    bool is_fnptr_arr = false;
+    int64_t arr_len = 0;
+    Expr *arr_expr = NULL;
+    if (!has_inner_fnptr && accept(p, TC_TK_LBRACK)) {
+        is_fnptr_arr = true;
+        parse_array_len_bracket(p, &arr_len, &arr_expr);
     }
     expect(p, TC_TK_RPAREN, str_lit("expected ')' in function-pointer declarator"));
     expect(p, TC_TK_LPAREN, str_lit("expected '(' before function-pointer parameter list"));
@@ -2036,6 +2051,7 @@ static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name) {
     if (cur(p).kind == TC_TK_KW_VOID && peek(p, 1).kind == TC_TK_RPAREN) p->i++;
     if (cur(p).kind != TC_TK_RPAREN) {
         for (;;) {
+            if (cur(p).kind == TC_TK_ELLIPSIS) { p->i++; break; }
             Type pty = {0};
             if (!parse_sig_type(p, &pty)) {
                 perror_at(p, cur(p).line, str_lit("expected parameter type"));
@@ -2065,7 +2081,15 @@ static bool try_parse_fnptr_suffix(P *p, Type *ty, string *out_name) {
     ty->fnptr_ret = ret_box;
     ty->fnptr_params = params;
     ty->fnptr_nparams = nparams;
-    if (ptr_to_fnptr) {
+    if (has_inner_fnptr) {
+        // `inner_fn` is the outer function pointer whose return type is `*ty`.
+        Type *ret_fn_box = arena_new(p->arena, Type);
+        *ret_fn_box = *ty;
+        inner_fn.fnptr_ret = ret_fn_box;
+        *ty = inner_fn;
+    } else if (is_fnptr_arr) {
+        make_ptr_array(p, ty, arr_len, arr_expr);
+    } else if (ptr_to_fnptr) {
         // Wrap as TY_PTR_PTR with the fnptr as pointee.
         wrap_ptr_to_ptr(p, ty);
     }
@@ -2230,11 +2254,39 @@ static bool parse_sig_type(P *p, Type *out) {
         return true;
     }
     if (cur(p).kind == TC_TK_KW_STRUCT || cur(p).kind == TC_TK_KW_UNION) {
-        p->i++;
-        TcTok sn = cur(p);
-        if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) return false;
-        out->kind = TY_STRUCT;
-        out->struct_name = tc_tok_text(sn);
+        bool inline_def = (peek(p, 1).kind == TC_TK_LBRACE) ||
+                          (peek(p, 1).kind == TC_TK_IDENT &&
+                           peek(p, 2).kind == TC_TK_LBRACE);
+        if (inline_def) {
+            StructDef *sd = parse_struct_def(p);
+            if (sd->name.size == 0) {
+                static int sig_anon_counter = 0;
+                sig_anon_counter++;
+                char *buf = arena_new_array(p->arena, char, 32);
+                int n = 0; int v = sig_anon_counter;
+                char digits[16]; int dn = 0;
+                if (v == 0) digits[dn++] = '0';
+                while (v > 0) { digits[dn++] = (char)('0' + (v % 10)); v /= 10; }
+                const char *prefix = "__anon_sig_";
+                for (size_t k = 0; prefix[k]; k++) buf[n++] = prefix[k];
+                while (dn > 0) buf[n++] = digits[--dn];
+                sd->name = (string){.str = buf, .size = (size_t)n};
+            }
+            size_t dummy_idx = 0;
+            if (!idx_lookup(p->st_buckets, sd->name, &dummy_idx)) {
+                size_t si = p->prog->structs.size;
+                VecStructDefPtr_push_back(p->arena, &p->prog->structs, sd);
+                idx_insert(p, p->st_buckets, sd->name, si);
+            }
+            out->kind = TY_STRUCT;
+            out->struct_name = sd->name;
+        } else {
+            p->i++;
+            TcTok sn = cur(p);
+            if (!expect(p, TC_TK_IDENT, str_lit("expected struct name"))) return false;
+            out->kind = TY_STRUCT;
+            out->struct_name = tc_tok_text(sn);
+        }
         skip_const(p);
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_STRUCT;
@@ -2358,7 +2410,13 @@ static Func *parse_func(P *p) {
     // macro expansion in corec/platform/platform_wasm.c produces this
     // shape after preprocessing: `uint32_t __attribute__((...)) name(...)`).
     parse_attributes(p, &attrs);
-    bool paren_name = (cur(p).kind == TC_TK_LPAREN &&
+    bool returns_fnptr = (cur(p).kind == TC_TK_LPAREN &&
+                          peek(p, 1).kind == TC_TK_STAR &&
+                          peek(p, 2).kind == TC_TK_IDENT &&
+                          peek(p, 3).kind == TC_TK_LPAREN);
+    if (returns_fnptr) { p->i += 2; }
+    bool paren_name = (!returns_fnptr &&
+                       cur(p).kind == TC_TK_LPAREN &&
                        peek(p, 1).kind == TC_TK_IDENT &&
                        peek(p, 2).kind == TC_TK_RPAREN);
     if (paren_name) p->i++;
@@ -2459,6 +2517,43 @@ static Func *parse_func(P *p) {
         }
     }
     expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
+    if (returns_fnptr) {
+        expect(p, TC_TK_RPAREN, str_lit("expected ')' in function-returning-fnptr declarator"));
+        expect(p, TC_TK_LPAREN, str_lit("expected '(' for returned function-pointer parameters"));
+        Type *rparams = NULL;
+        int rnparams = 0, rcap = 0;
+        if (cur(p).kind == TC_TK_KW_VOID && peek(p, 1).kind == TC_TK_RPAREN) p->i++;
+        if (cur(p).kind != TC_TK_RPAREN) {
+            for (;;) {
+                if (cur(p).kind == TC_TK_ELLIPSIS) { p->i++; break; }
+                Type rpty = {0};
+                if (!parse_sig_type(p, &rpty)) {
+                    perror_at(p, cur(p).line, str_lit("expected parameter type"));
+                    break;
+                }
+                string dummy = (string){0};
+                try_parse_fnptr_suffix(p, &rpty, &dummy);
+                if (cur(p).kind == TC_TK_IDENT) p->i++;
+                if (rnparams == rcap) {
+                    int ncap = rcap ? rcap * 2 : 4;
+                    Type *np = arena_new_array(p->arena, Type, (size_t)ncap);
+                    for (int k = 0; k < rnparams; k++) np[k] = rparams[k];
+                    rparams = np;
+                    rcap = ncap;
+                }
+                rparams[rnparams++] = rpty;
+                if (!accept(p, TC_TK_COMMA)) break;
+            }
+        }
+        expect(p, TC_TK_RPAREN, str_lit("expected ')' after returned function-pointer parameters"));
+        Type *ret_box = arena_new(p->arena, Type);
+        *ret_box = f->return_type;
+        f->return_type = (Type){0};
+        f->return_type.kind = TY_FNPTR;
+        f->return_type.fnptr_ret = ret_box;
+        f->return_type.fnptr_params = rparams;
+        f->return_type.fnptr_nparams = rnparams;
+    }
     // Trailing `__attribute__((...))` (e.g. `int foo(void) __attribute__((const));`).
     {
         AttrInfo trailing = (AttrInfo){0};
@@ -3193,15 +3288,16 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         Type tty = {0};
         if (parse_sig_type(&p, &tty)) {
             parse_attributes(&p, &gattrs);
-            // Function-pointer global: `int (*name)(types);`.
-            if (cur(&p).kind == TC_TK_LPAREN && peek(&p, 1).kind == TC_TK_STAR) {
+            // Function-pointer global: `int (*name)(types);` or `int (*tab[N])(types);`.
+            // Do NOT intercept functions returning a function pointer: `T (*name(params))(ret_params)`.
+            if (cur(&p).kind == TC_TK_LPAREN && peek(&p, 1).kind == TC_TK_STAR &&
+                !(peek(&p, 2).kind == TC_TK_IDENT && peek(&p, 3).kind == TC_TK_LPAREN)) {
                 string fnp_name = (string){0};
                 try_parse_fnptr_suffix(&p, &tty, &fnp_name);
                 if (fnp_name.size == 0) {
                     perror_at(&p, cur(&p).line,
                               str_lit("function-pointer global requires a name"));
                 }
-                expect(&p, TC_TK_SEMI, str_lit("expected ';' after global function pointer"));
                 Global g = (Global){0};
                 g.name = fnp_name;
                 g.type = tty;
@@ -3212,6 +3308,19 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                 // type; the pointer object itself stays writable.
                 g.is_const = false;
                 g.line = cur(&p).line;
+                if (accept(&p, TC_TK_ASSIGN)) {
+                    g.has_init = true;
+                    if (cur(&p).kind == TC_TK_LBRACE) {
+                        g.init_expr = parse_aggregate_init(&p, g.type);
+                    } else if (cur(&p).kind == TC_TK_KW_NULL) {
+                        p.i++;
+                    } else {
+                        Expr *gex = parse_assign_or_or(&p);
+                        int64_t cv = 0;
+                        if (gex && parse_const_eval(&p, gex, &cv)) g.init_int = cv;
+                    }
+                }
+                expect(&p, TC_TK_SEMI, str_lit("expected ';' after global function pointer"));
                 merge_push_global(&p, prog, g);
                 continue;
             }
