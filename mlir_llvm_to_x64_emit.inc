@@ -527,21 +527,51 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     case OP_TYPE_LLVM_OR: case OP_TYPE_LLVM_XOR: {
         uint8_t opc = ty == OP_TYPE_LLVM_ADD ? 0x01 : ty == OP_TYPE_LLVM_SUB ? 0x29 :
                       ty == OP_TYPE_LLVM_AND ? 0x21 : ty == OP_TYPE_LLVM_OR ? 0x09 : 0x31;
+        uint8_t ext = ty == OP_TYPE_LLVM_ADD ? 0 : ty == OP_TYPE_LLVM_SUB ? 5 :
+                      ty == OP_TYPE_LLVM_AND ? 4 : ty == OP_TYPE_LLVM_OR ? 1 : 6;
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
+        MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, op, 1);
         int w = val_w(ctx, r);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 0), RAX, w);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 1), RCX, w);
-        alu_rr(F, opc, RAX, RCX, w);
-        store_val_w(F, r, RAX, w);
+        uint8_t rD;
+        bool has_rD = val_in_reg(F, r, &rD);
+        int64_t imm;
+        if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) &&
+            imm >= INT32_MIN && imm <= INT32_MAX) {
+            uint8_t dst = has_rD ? rD : RAX;
+            load_val_w(F, a0, dst, w);
+            alu_ri(F, ext, dst, (int32_t)imm, w);
+            if (!has_rD) store_val_w(F, r, dst, w);
+            return;
+        }
+        uint8_t r1 = val_reg_or_load(F, a1, RCX, w);
+        uint8_t dst = (has_rD && rD != r1) ? rD : RAX;
+        load_val_w(F, a0, dst, w);
+        alu_rr(F, opc, dst, r1, w);
+        if (!has_rD || dst != rD) store_val_w(F, r, dst, w);
         return;
     }
     case OP_TYPE_LLVM_MUL: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
+        MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, op, 1);
         int w = val_w(ctx, r);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 0), RAX, w);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 1), RCX, w);
-        imul_rr(F, RAX, RCX, w);
-        store_val_w(F, r, RAX, w);
+        uint8_t rD;
+        bool has_rD = val_in_reg(F, r, &rD);
+        int64_t imm;
+        if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) &&
+            imm >= INT32_MIN && imm <= INT32_MAX) {
+            uint8_t s0 = val_reg_or_load(F, a0, RAX, w);
+            uint8_t dst = has_rD ? rD : RAX;
+            imul_ri(F, dst, s0, (int32_t)imm, w);
+            if (!has_rD) store_val_w(F, r, dst, w);
+            return;
+        }
+        uint8_t r1 = val_reg_or_load(F, a1, RCX, w);
+        uint8_t dst = (has_rD && rD != r1) ? rD : RAX;
+        load_val_w(F, a0, dst, w);
+        imul_rr(F, dst, r1, w);
+        if (!has_rD || dst != rD) store_val_w(F, r, dst, w);
         return;
     }
     // division / remainder
@@ -564,13 +594,26 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         store_val(F, r, (sdiv || udiv) ? RAX : RDX);
         return;
     }
-    // shifts: dst = op0 SH op1(cl)
+    // shifts: dst = op0 SH op1(cl / imm)
     case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
+        MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, op, 1);
         int w = val_w(ctx, r);
         int ext = ty == OP_TYPE_LLVM_SHL ? 4 : (ty == OP_TYPE_LLVM_LSHR ? 5 : 7);
-        load_val(F, MLIR_GetOpOperand(ctx, op, 0), RAX);
-        load_val(F, MLIR_GetOpOperand(ctx, op, 1), RCX);
+        int64_t imm;
+        if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) && imm >= 0 && imm < 64) {
+            uint8_t rD;
+            bool has_rD = val_in_reg(F, r, &rD);
+            uint8_t dst = has_rD ? rD : RAX;
+            load_val_w(F, a0, dst, w);
+            if (imm == 1)      { rex(F, w, 0, 0, dst); eb(F, 0xD1); modrm(F, 3, ext, dst); }
+            else if (imm != 0) { rex(F, w, 0, 0, dst); eb(F, 0xC1); modrm(F, 3, ext, dst); eb(F, (uint8_t)imm); }
+            if (!has_rD) store_val_w(F, r, dst, w);
+            return;
+        }
+        load_val(F, a0, RAX);
+        load_val(F, a1, RCX);
         rex(F, w, 0, 0, RAX); eb(F, 0xD3); modrm(F, 3, ext, RAX);
         store_val(F, r, RAX);
         return;
@@ -579,13 +622,21 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     case OP_TYPE_LLVM_ICMP: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
         MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
+        MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, op, 1);
         int w = val_w(ctx, a0);
         int64_t pred = 0;
         MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
         if (pa) pred = MLIR_GetAttributeInteger(ctx, pa);
-        load_val_w(F, a0, RAX, w);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 1), RCX, w);
-        alu_rr(F, 0x39, RAX, RCX, w);             // cmp rax, rcx
+        uint8_t r0 = val_reg_or_load(F, a0, RAX, w);
+        int64_t imm;
+        if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) &&
+            imm >= INT32_MIN && imm <= INT32_MAX) {
+            if (imm == 0) alu_rr(F, 0x85, r0, r0, w);
+            else          alu_ri(F, 7, r0, (int32_t)imm, w);
+        } else {
+            uint8_t r1 = val_reg_or_load(F, a1, RCX, w);
+            alu_rr(F, 0x39, r0, r1, w);
+        }
         setcc_al(F, icmp_cc(pred));
         store_val_w(F, r, RAX, 0);
         return;
@@ -639,18 +690,33 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     // memory
     case OP_TYPE_LLVM_LOAD: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+        MLIR_ValueHandle addr = MLIR_GetOpOperand(ctx, op, 0);
         int nb = type_bytes(ctx, r);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 0), RCX, 1);   // address (ptr = 64-bit)
-        load_mem(F, RAX, RCX, nb, false);
-        store_val_w(F, r, RAX, nb > 4 ? 1 : 0);
+        uint8_t rD;
+        bool has_rD = val_in_reg(F, r, &rD);
+        uint8_t dst = has_rD ? rD : RAX;
+        int32_t aoff;
+        if (alloca_slot(F, addr, &aoff)) {
+            load_rbp_sized(F, dst, aoff, nb);
+        } else {
+            uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
+            load_mem(F, dst, ra, nb, false);
+        }
+        if (!has_rD) store_val_w(F, r, dst, nb > 4 ? 1 : 0);
         return;
     }
     case OP_TYPE_LLVM_STORE: {
         MLIR_ValueHandle val = MLIR_GetOpOperand(ctx, op, 0);
+        MLIR_ValueHandle addr = MLIR_GetOpOperand(ctx, op, 1);
         int nb = type_bytes(ctx, val);
-        load_val_w(F, val, RAX, nb > 4 ? 1 : 0);
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 1), RCX, 1);   // address (ptr = 64-bit)
-        store_mem(F, RCX, RAX, nb);
+        uint8_t rv = val_reg_or_load(F, val, RAX, nb > 4 ? 1 : 0);
+        int32_t aoff;
+        if (alloca_slot(F, addr, &aoff)) {
+            store_rbp_sized(F, aoff, rv, nb);
+        } else {
+            uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
+            store_mem(F, ra, rv, nb);
+        }
         return;
     }
     case OP_TYPE_LLVM_GEP: {
@@ -663,7 +729,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         size_t n_idx = MLIR_GetAttributeDenseI32(ctx, ria, cidx, 64);
         if (n_idx > 64) n_idx = 64;
         if (n_idx == 0) { fail(F, "getelementptr with no indices", (string){0}); return; }
-        load_val_w(F, MLIR_GetOpOperand(ctx, op, 0), RAX, 1);  // running address (ptr = 64-bit)
+        MLIR_ValueHandle base = MLIR_GetOpOperand(ctx, op, 0);
+        int32_t aoff;
+        if (alloca_slot(F, base, &aoff)) lea_rbp(F, RAX, aoff);
+        else                             load_val_w(F, base, RAX, 1);  // running address (ptr = 64-bit)
         size_t op_idx = 1;                                 // next dynamic operand
         MLIR_TypeHandle cur_ty = elem_ty;
         for (size_t i = 0; i < n_idx; i++) {
@@ -954,6 +1023,60 @@ static unsigned alloca_bytes(MLIR_Context *ctx, MLIR_OpHandle op) {
     return (esz + 7) & ~7u;
 }
 
+static bool x64_val_dead_after_term(FnCtx *F, MLIR_ValueHandle v) {
+    if (F->fast_ra) {
+        uint8_t dummy;
+        return val_in_reg(F, v, &dummy);
+    }
+    if (MLIR_HasContextDefUseTracking(F->ctx))
+        return MLIR_ValueHasOneUse(F->ctx, v);
+    return false;
+}
+
+static void emit_fused_cond_br(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle br_op,
+                               MLIR_BlockHandle next_blk, MLIR_OpHandle icmp_op, bool invert) {
+    MLIR_Context *ctx = F->ctx;
+    MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, icmp_op, 0);
+    MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, icmp_op, 1);
+    int w = val_w(ctx, a0);
+    int64_t pred = 0;
+    MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, icmp_op, MLIR_KEY_PREDICATE);
+    if (pa) pred = MLIR_GetAttributeInteger(ctx, pa);
+    int cc = icmp_cc(pred);
+    if (invert) cc ^= 1;
+
+    uint8_t r0 = val_reg_or_load(F, a0, RAX, w);
+    int64_t imm;
+    if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) &&
+        imm >= INT32_MIN && imm <= INT32_MAX) {
+        if (imm == 0) alu_rr(F, 0x85, r0, r0, w);
+        else          alu_ri(F, 7, r0, (int32_t)imm, w);
+    } else {
+        uint8_t r1 = val_reg_or_load(F, a1, RCX, w);
+        alu_rr(F, 0x39, r0, r1, w);
+    }
+
+    MLIR_BlockHandle tt = MLIR_GetOpSuccessor(ctx, br_op, 0);
+    MLIR_BlockHandle ft = MLIR_GetOpSuccessor(ctx, br_op, 1);
+    if (ft == next_blk) {
+        eb(F, 0x0F); eb(F, (uint8_t)(0x80 + cc));
+        uint32_t fld = here(F); e32(F, 0);
+        add_fix(F, block_index(ctx, reg, tt), fld);
+        return;
+    }
+    if (tt == next_blk) {
+        eb(F, 0x0F); eb(F, (uint8_t)(0x80 + (cc ^ 1)));
+        uint32_t fld = here(F); e32(F, 0);
+        add_fix(F, block_index(ctx, reg, ft), fld);
+        return;
+    }
+    eb(F, 0x0F); eb(F, (uint8_t)(0x80 + cc));
+    uint32_t f_t = here(F); e32(F, 0);
+    add_fix(F, block_index(ctx, reg, tt), f_t);
+    eb(F, 0xE9); uint32_t f_f = here(F); e32(F, 0);
+    add_fix(F, block_index(ctx, reg, ft), f_f);
+}
+
 static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymSet *refs) {
     FnCtx F; memset(&F, 0, sizeof(F));
     F.ctx = ctx; F.f = f; F.ok = true;
@@ -1154,10 +1277,78 @@ static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymS
         MLIR_BlockHandle next_bk = (b + 1 < nb) ? MLIR_GetRegionBlock(ctx, reg, b + 1) : MLIR_INVALID_HANDLE;
         F.block_off[b] = here(&F);
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
-        for (size_t i = 0; i < no && F.ok; i++) {
-            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
-            if (i + 1 == no) lower_term(&F, reg, op, next_bk);
-            else             lower_op(&F, op, refs);
+        // Check for fusable `icmp [-> select(1,0) -> icmp ne/eq 0] -> cond_br` at block tail,
+        // skipping any rematerialized constant ops in between (which emit no code).
+        size_t emit_end = no > 0 ? no - 1 : 0;
+        MLIR_OpHandle fused_icmp = MLIR_INVALID_HANDLE;
+        bool fused_invert = false;
+        if (no >= 2) {
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            if (MLIR_GetOpType(ctx, term) == OP_TYPE_LLVM_COND_BR &&
+                MLIR_GetOpNumSuccessorOperands(ctx, term, 0) == 0 &&
+                MLIR_GetOpNumSuccessorOperands(ctx, term, 1) == 0) {
+                MLIR_ValueHandle cond = MLIR_GetOpOperand(ctx, term, 0);
+                size_t p1 = no - 1;
+                while (p1 > 0 && x64_op_rematerialized(ctx, MLIR_GetBlockOp(ctx, bk, p1 - 1))) p1--;
+                if (p1 > 0) {
+                    MLIR_OpHandle prev = MLIR_GetBlockOp(ctx, bk, p1 - 1);
+                    if (MLIR_GetOpType(ctx, prev) == OP_TYPE_LLVM_ICMP &&
+                        MLIR_GetOpResult(ctx, prev, 0) == cond &&
+                        x64_val_dead_after_term(&F, cond)) {
+                        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, prev, MLIR_KEY_PREDICATE);
+                        int64_t pred = pa ? MLIR_GetAttributeInteger(ctx, pa) : 0;
+                        int64_t c0 = 0;
+                        if ((pred == 0 || pred == 1) &&
+                            is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, prev, 1)), &c0) &&
+                            c0 == 0) {
+                            MLIR_ValueHandle inner = MLIR_GetOpOperand(ctx, prev, 0);
+                            size_t p2 = p1 - 1;
+                            while (p2 > 0 && x64_op_rematerialized(ctx, MLIR_GetBlockOp(ctx, bk, p2 - 1))) p2--;
+                            if (p2 > 0) {
+                                MLIR_OpHandle sel = MLIR_GetBlockOp(ctx, bk, p2 - 1);
+                                int64_t vt = 0, vf = 0;
+                                if (MLIR_GetOpType(ctx, sel) == OP_TYPE_LLVM_SELECT &&
+                                    MLIR_GetOpResult(ctx, sel, 0) == inner &&
+                                    x64_val_dead_after_term(&F, inner) &&
+                                    is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, sel, 1)), &vt) &&
+                                    is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, sel, 2)), &vf) &&
+                                    ((vt == 1 && vf == 0) || (vt == 0 && vf == 1))) {
+                                    size_t p3 = p2 - 1;
+                                    while (p3 > 0 && x64_op_rematerialized(ctx, MLIR_GetBlockOp(ctx, bk, p3 - 1))) p3--;
+                                    if (p3 > 0) {
+                                        MLIR_OpHandle ic0 = MLIR_GetBlockOp(ctx, bk, p3 - 1);
+                                        if (MLIR_GetOpType(ctx, ic0) == OP_TYPE_LLVM_ICMP &&
+                                            MLIR_GetOpResult(ctx, ic0, 0) == MLIR_GetOpOperand(ctx, sel, 0) &&
+                                            x64_val_dead_after_term(&F, MLIR_GetOpResult(ctx, ic0, 0))) {
+                                            fused_icmp = ic0;
+                                            fused_invert = (pred == 0) ^ (vt == 0);
+                                            emit_end = p3 - 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if (fused_icmp == MLIR_INVALID_HANDLE) {
+                                fused_icmp = prev;
+                                fused_invert = false;
+                                emit_end = p1 - 1;
+                            }
+                        } else {
+                            fused_icmp = prev;
+                            fused_invert = false;
+                            emit_end = p1 - 1;
+                        }
+                    }
+                }
+            }
+        }
+        for (size_t i = 0; i < emit_end && F.ok; i++)
+            lower_op(&F, MLIR_GetBlockOp(ctx, bk, i), refs);
+        if (no > 0 && F.ok) {
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            if (fused_icmp != MLIR_INVALID_HANDLE)
+                emit_fused_cond_br(&F, reg, term, next_bk, fused_icmp, fused_invert);
+            else
+                lower_term(&F, reg, term, next_bk);
         }
     }
 
