@@ -31,10 +31,31 @@ extern "C" {
 // Value handle -> int32 map (slot index / physical register / use count),
 // open-addressed and arena-backed.
 typedef struct { uintptr_t key; int32_t slot; } SlotEnt;
-typedef struct { SlotEnt *t; size_t cap; size_t n; Arena *arena; } SlotMap;
+typedef struct {
+    SlotEnt *t;
+    size_t cap;
+    size_t n;
+    Arena *arena;
+    // Optional dense direct-indexed table (empty = -1) for native dense handles.
+    int32_t *dense;
+    uintptr_t dense_base;
+    size_t dense_len;
+} SlotMap;
 void sm_put(SlotMap *m, MLIR_ValueHandle k, int32_t slot);
 bool sm_get(SlotMap *m, MLIR_ValueHandle k, int32_t *out);
 void uc_inc(SlotMap *m, MLIR_ValueHandle k);
+
+static inline bool sm_get_fast(SlotMap *m, MLIR_ValueHandle k, int32_t *out) {
+    if (m->dense) {
+        uintptr_t idx = (uintptr_t)k - m->dense_base;
+        if (idx < m->dense_len) {
+            int32_t v = m->dense[idx];
+            if (v >= 0) { *out = v; return true; }
+        }
+        if (m->cap == 0) return false;
+    }
+    return sm_get(m, k, out);
+}
 
 // Fold/const/cast hooks the allocators call, defined by the aarch64 backend
 // (mlir_llvm_to_aarch64.c). x64 reuses const_int_val / cast_src (generic) and
@@ -60,6 +81,18 @@ typedef struct RegTarget {
     uint8_t pool[RA_MAXPOOL];
     SlotMap *memfuse, *memspine, *shiftfuse;
 } RegTarget;
+
+// Fast block-local linear-scan allocator for -O0 / default mode: O(ops) with
+// zero global liveness dataflow, zero crosses_call backwards walk, and zero
+// sort. Cross-block values and block args get dedicated frame slots; block-local
+// values are allocated into callee-saved regs (or full pool in call-free blocks)
+// with per-block spill-slot reuse. Returns callee-saved use mask, or RA_BAIL.
+uint32_t mlir_regalloc_fast(MLIR_Context *ctx, MLIR_RegionHandle reg,
+                            size_t n_blocks, SlotMap *rm,
+                            SlotMap *sm, int32_t *out_nslots,
+                            const RegTarget *T);
+const MLIR_OpHandle *mlir_regalloc_fast_allocas(size_t *out_n);
+uint32_t mlir_regalloc_fast_max_edge(void);
 
 // Whole-function linear scan. Fills `rm` (value->phys reg) and `sm` (reused
 // frame slots for spilled values), sets *out_nslots, and returns the callee-
