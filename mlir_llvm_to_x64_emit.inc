@@ -1823,8 +1823,15 @@ static void synth_start(ObjModule *m, GMap *gm, Buf *data,
         rex(&F, 1, RDX, RDI, RSI); eb(&F, 0x8D); modrm(&F, 1, RDX, 4);
         eb(&F, (uint8_t)((3 << 6) | ((RDI & 7) << 3) | (RSI & 7))); eb(&F, 0x08);
         rex(&F, 1, 0, 0, RSP); eb(&F, 0x83); modrm(&F, 3, 4, RSP); eb(&F, 0xF0);
+        // Preserve argc/argv/envp in callee-saved registers across platform_init.
+        mov_rr(&F, RBX, RDI, 1);
+        mov_rr(&F, R12, RSI, 1);
+        mov_rr(&F, R13, RDX, 1);
         eb(&F, 0xE8); uint32_t fld_init = here(&F); e32(&F, 0);
         obj_add_reloc(f, fld_init, fld_init+4, false, heapdup_cstr("platform_init"), 0);
+        mov_rr(&F, RDI, RBX, 1);
+        mov_rr(&F, RSI, R12, 1);
+        mov_rr(&F, RDX, R13, 1);
         eb(&F, 0xE8); uint32_t fld_main = here(&F); e32(&F, 0);
         obj_add_reloc(f, fld_main, fld_main+4, false, heapdup_cstr(entry_sym), 0);
     }
