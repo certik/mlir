@@ -1,0 +1,52 @@
+extern int printf(const char *fmt, ...);
+
+enum {
+    N = 3,
+    SZ_INT = sizeof(int),
+    SZ_PTR = sizeof(void *),
+    MIXED = (int)(sizeof(long long) * 2) + N,
+};
+
+int g_sum = 1 + 2;
+int g_sz = sizeof(int) * 3;
+int g_neg = -(10 + 5);
+
+typedef double *DblPtr;
+typedef int (*FnPtr)(int);
+
+struct S {
+    int a[N];
+    char b[1 + 2];
+    long c[sizeof(void *)];
+    const char *p[3][2];
+    int *const cp;
+    double *dp;
+    DblPtr *dpp;
+    FnPtr *fnp;
+};
+
+int main(void) {
+    struct S s;
+    s.a[2] = 5;
+    s.b[1] = 'K';
+    s.p[1][1] = "hi";
+    double d = 2.5;
+    s.dp = &d;
+    DblPtr dptr = &d;
+    s.dpp = &dptr;
+
+    int sw = 0;
+    switch (4) {
+        case sizeof(int): sw = 44; break;
+        default: sw = 99; break;
+    }
+    int sw2 = 0;
+    switch (N + 2) {
+        case 1 + 4: sw2 = 55; break;
+        default: sw2 = 88; break;
+    }
+    printf("%d %d %d %d %d\n", g_sum, g_sz, g_neg, SZ_INT, MIXED);
+    printf("%d %c %s %.1f %.1f\n", s.a[2], s.b[1], s.p[1][1], *s.dp, **s.dpp);
+    printf("%d %d\n", sw, sw2);
+    return 0;
+}
