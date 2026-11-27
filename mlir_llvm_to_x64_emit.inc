@@ -1865,11 +1865,55 @@ static void synth_start(ObjModule *m, GMap *gm, Buf *data,
     eb(&F, 0x0F); eb(&F, 0x05);
 }
 
-// Synthesize the raw-syscall thunk for __tinyc_syscall6 / syscall.
-// All corec/WASI forwarding stubs (platform_init, __assert_fail) live in
-// corec/wasm/wasi_adapter.c so the x86_64 backend stays agnostic to corec
-// symbol names.
+// Synthesize compiler-builtin thunks (__tinyc_setjmp, __tinyc_longjmp,
+// __tinyc_syscall6 / syscall). All corec/WASI forwarding stubs (platform_init,
+// __assert_fail) live in corec/wasm/wasi_adapter.c so the x86_64 backend stays
+// agnostic to corec symbol names.
 static bool synth_thunk(ObjModule *m, string name) {
+    if (str_eqz(name, "__tinyc_setjmp")) {
+        char *fn = heapdup_cstr("__tinyc_setjmp");
+        ObjFunc *f = obj_add_func(m, fn, false);
+        FnCtx F; memset(&F, 0, sizeof(F)); F.f = f;
+        // SysV x86_64: rdi = jmp_buf (8 x i64): rbx, rbp, r12..r15, rsp, rip.
+        static const uint8_t code[] = {
+            0x48, 0x89, 0x1F,             // mov [rdi+0],  rbx
+            0x48, 0x89, 0x6F, 0x08,       // mov [rdi+8],  rbp
+            0x4C, 0x89, 0x67, 0x10,       // mov [rdi+16], r12
+            0x4C, 0x89, 0x6F, 0x18,       // mov [rdi+24], r13
+            0x4C, 0x89, 0x77, 0x20,       // mov [rdi+32], r14
+            0x4C, 0x89, 0x7F, 0x28,       // mov [rdi+40], r15
+            0x48, 0x8D, 0x44, 0x24, 0x08, // lea rax, [rsp+8]
+            0x48, 0x89, 0x47, 0x30,       // mov [rdi+48], rax
+            0x48, 0x8B, 0x04, 0x24,       // mov rax, [rsp]
+            0x48, 0x89, 0x47, 0x38,       // mov [rdi+56], rax
+            0x31, 0xC0,                   // xor eax, eax
+            0xC3,                         // ret
+        };
+        for (size_t i = 0; i < sizeof(code); i++) eb(&F, code[i]);
+        return true;
+    }
+    if (str_eqz(name, "__tinyc_longjmp")) {
+        char *fn = heapdup_cstr("__tinyc_longjmp");
+        ObjFunc *f = obj_add_func(m, fn, false);
+        FnCtx F; memset(&F, 0, sizeof(F)); F.f = f;
+        // SysV x86_64: rdi = jmp_buf, esi = val (0 -> 1 per C11 7.13.2.1).
+        static const uint8_t code[] = {
+            0x89, 0xF0,                   // mov eax, esi
+            0x85, 0xC0,                   // test eax, eax
+            0x75, 0x02,                   // jnz +2
+            0xFF, 0xC0,                   // inc eax
+            0x48, 0x8B, 0x1F,             // mov rbx, [rdi+0]
+            0x48, 0x8B, 0x6F, 0x08,       // mov rbp, [rdi+8]
+            0x4C, 0x8B, 0x67, 0x10,       // mov r12, [rdi+16]
+            0x4C, 0x8B, 0x6F, 0x18,       // mov r13, [rdi+24]
+            0x4C, 0x8B, 0x77, 0x20,       // mov r14, [rdi+32]
+            0x4C, 0x8B, 0x7F, 0x28,       // mov r15, [rdi+40]
+            0x48, 0x8B, 0x67, 0x30,       // mov rsp, [rdi+48]
+            0xFF, 0x67, 0x38,             // jmp qword ptr [rdi+56]
+        };
+        for (size_t i = 0; i < sizeof(code); i++) eb(&F, code[i]);
+        return true;
+    }
     // __tinyc_syscall6(num, a1..a6): the runtime syscall number is the first C
     // argument, so we cannot bake an NR_* constant — instead reshuffle the SysV
     // argument registers into the Linux x86_64 kernel convention (number in

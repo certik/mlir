@@ -1837,3 +1837,9 @@ name = "bitfields"
 targets = ["native", "wasm", "macho", "elf"]
 # Bit-fields: SysV packing, signed/unsigned extraction, read-modify-write, :0 (#336).
 expected_stdout = "1 5 9 8\n-3 11 19 8\n6 25 3 2\n"
+
+[[test]]
+name = "elf_setjmp_longjmp"
+targets = ["elf"]
+# __builtin_setjmp / __builtin_longjmp on x86_64/ELF (#337).
+expected_stdout = "first\ncaught 42\nzero-becomes 1\n"
