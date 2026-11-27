@@ -1210,6 +1210,48 @@ int app_main(void) {
                              : str_lit("pass pipeline API: no\n"));
     }
 
+    // Generic printer: nested arrays and escaped string attributes (#299).
+    {
+        MLIR_TypeHandle i32_ty = MLIR_CreateTypeInteger(ctx, 32, false);
+        MLIR_AttributeHandle row0[2] = {
+            MLIR_CreateAttributeInteger(ctx, 1, i32_ty),
+            MLIR_CreateAttributeInteger(ctx, 2, i32_ty),
+        };
+        MLIR_AttributeHandle row1[1] = {
+            MLIR_CreateAttributeInteger(ctx, 3, i32_ty),
+        };
+        MLIR_AttributeHandle outer[2] = {
+            MLIR_CreateAttributeArray(ctx, row0, 2),
+            MLIR_CreateAttributeArray(ctx, row1, 1),
+        };
+        MLIR_AttributeHandle nested_arr = MLIR_CreateAttributeArray(ctx, outer, 2);
+        const char raw_bytes[7] = { 'h', 'i', '\n', '\0', '"', '\\', 'x' };
+        string raw_str = { (char *)raw_bytes, 7 };
+        MLIR_AttributeHandle esc_str = MLIR_CreateAttributeString(ctx, raw_str);
+
+        MLIR_NamedAttr gattrs[2] = {
+            MLIR_Named(MLIR_InternAttrKey(ctx, str_lit("nested")), nested_arr),
+            MLIR_Named(MLIR_InternAttrKey(ctx, str_lit("text")), esc_str),
+        };
+        MLIR_OpSpec gspec = {0};
+        gspec.type = MLIR_RegisterOpType(ctx, str_lit("test.generic_attrs"));
+        gspec.attrs = gattrs;
+        gspec.n_attrs = 2;
+        MLIR_OpHandle gop = MLIR_CreateOpFromSpec(ctx, &gspec);
+        string printed = print_operation_generic(ctx, 0, gop);
+        string want_arr = str_lit("nested = [[1, 2], [3]]");
+        string want_str = str_lit("text = \"hi\\0A\\00\\\"\\\\x\"");
+        bool arr_ok = false, str_ok = false;
+        for (size_t i = 0; i + want_arr.size <= printed.size; i++) {
+            if (str_eq((string){ printed.str + i, want_arr.size }, want_arr)) { arr_ok = true; break; }
+        }
+        for (size_t i = 0; i + want_str.size <= printed.size; i++) {
+            if (str_eq((string){ printed.str + i, want_str.size }, want_str)) { str_ok = true; break; }
+        }
+        print_string((arr_ok && str_ok) ? str_lit("generic printer nested/escaped: yes\n")
+                                        : str_lit("generic printer nested/escaped: no\n"));
+    }
+
     MLIR_DestroyContext(ctx);
     arena_destroy(arena);
     return 0;

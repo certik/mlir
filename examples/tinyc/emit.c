@@ -538,6 +538,12 @@ static MLIR_OpHandle emit_op(E *e,
                              MLIR_ValueHandle *operands, size_t n_operands,
                              MLIR_NamedAttr *attrs, size_t n_attrs,
                              MLIR_RegionHandle *regions, size_t n_regions) {
+    if (e->err_count > 0) {
+        if (results) {
+            for (size_t i = 0; i < n_results; i++) results[i] = MLIR_INVALID_HANDLE;
+        }
+        return MLIR_INVALID_HANDLE;
+    }
     MLIR_OpSpec spec = {0};
     spec.type = type;
     spec.operands = operands;
@@ -565,6 +571,7 @@ static MLIR_OpHandle emit_op(E *e,
 static MLIR_ValueHandle emit_op1(E *e, MLIR_OpType type, MLIR_TypeHandle rt,
                                  const MLIR_ValueHandle *operands, uint32_t n_operands,
                                  const MLIR_NamedAttr *attrs, uint32_t n_attrs) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     MLIR_OpSpec spec = {0};
     spec.type = type;
     spec.operands = operands;
@@ -599,7 +606,7 @@ static void emit_return_op(E *e, MLIR_ValueHandle *ops, size_t n_ops) {
 }
 
 static void emit_branch(E *e, MLIR_BlockHandle target) {
-    if (e->terminated) return;
+    if (e->terminated || e->err_count > 0) return;
     MLIR_Builder b = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
     b.loc = eloc(e, 0);
     MLIR_BuildBr(&b, OP_TYPE_CF_BR, target, NULL, 0);
@@ -608,7 +615,7 @@ static void emit_branch(E *e, MLIR_BlockHandle target) {
 
 static void emit_cond_branch(E *e, MLIR_ValueHandle cond,
                              MLIR_BlockHandle true_b, MLIR_BlockHandle false_b) {
-    if (e->terminated) return;
+    if (e->terminated || e->err_count > 0) return;
     MLIR_Builder b = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
     b.loc = eloc(e, 0);
     MLIR_BuildCondBr(&b, OP_TYPE_CF_COND_BR, cond, true_b, NULL, 0, false_b, NULL, 0);
@@ -678,6 +685,7 @@ static MLIR_ValueHandle emit_const_f64(E *e, double v) {
 
 static MLIR_ValueHandle emit_unary(E *e, MLIR_OpType type,
                                    MLIR_TypeHandle rt, MLIR_ValueHandle v) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = eloc(e, 0);
@@ -719,6 +727,7 @@ static MLIR_ValueHandle emit_const_i64(E *e, int64_t v) {
 static MLIR_ValueHandle emit_binop(E *e, MLIR_OpType type,
                                    MLIR_TypeHandle rt,
                                    MLIR_ValueHandle a, MLIR_ValueHandle b) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = eloc(e, 0);
@@ -763,6 +772,7 @@ static MLIR_ValueHandle emit_narrow_i32(E *e, MLIR_ValueHandle v, int bits,
 
 static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     MLIR_AttributeHandle pa = emit_cmpi_pred_attr(e, predicate);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
@@ -776,6 +786,7 @@ static MLIR_ValueHandle emit_cmpi(E *e, int64_t predicate,
 
 static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
                                   MLIR_ValueHandle a, MLIR_ValueHandle b) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     MLIR_AttributeHandle pa = emit_cmpi_pred_attr(e, predicate);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
@@ -789,6 +800,7 @@ static MLIR_ValueHandle emit_cmpf(E *e, int64_t predicate,
 
 static MLIR_ValueHandle emit_icmp_ptr(E *e, int64_t predicate,
                                       MLIR_ValueHandle a, MLIR_ValueHandle b) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     MLIR_AttributeHandle pa = emit_cmpi_pred_attr(e, predicate);
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
@@ -1081,6 +1093,7 @@ static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
     // (where local declarations sit on each iteration) don't grow the stack
     // unboundedly. We share a single `arith.constant 1 : i64` count operand
     // that lives at the top of the entry block.
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     MLIR_AttributeHandle elem_attr = emit_type_attr(e, elem_ty);
     bool hoist = e->entry_block && e->entry_block != e->cur_block;
     if (!hoist && e->cur_block) {
@@ -1112,6 +1125,7 @@ static MLIR_ValueHandle emit_alloca(E *e, MLIR_TypeHandle elem_ty) {
 }
 
 static void emit_store_v(E *e, MLIR_ValueHandle val, MLIR_ValueHandle ptr) {
+    if (e->err_count > 0) return;
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = e->loc;
@@ -1124,6 +1138,7 @@ static void emit_store_v(E *e, MLIR_ValueHandle val, MLIR_ValueHandle ptr) {
 }
 
 static MLIR_ValueHandle emit_load_v(E *e, MLIR_ValueHandle ptr, MLIR_TypeHandle elem_ty) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     if (e->cur_block) {
         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
         bd.loc = eloc(e, 0);
@@ -1143,6 +1158,7 @@ static MLIR_ValueHandle emit_gep(E *e,
         MLIR_TypeHandle source_elem_ty,
         const int32_t *raw_idx, size_t n_raw,
         MLIR_ValueHandle *dyn_idx, size_t n_dyn) {
+    if (e->err_count > 0) return MLIR_INVALID_HANDLE;
     MLIR_AttributeHandle idx_attr;
     if (n_raw == 2 && raw_idx[0] == 0) {
         if (raw_idx[1] >= 0 && raw_idx[1] < 32) {
@@ -1904,6 +1920,13 @@ static void lval_set_ctype(LVal *r, Type *t) {
 }
 
 static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
+    if (e->err_count > 0) {
+        LVal r = {0};
+        r.source_elem = MLIR_INVALID_HANDLE;
+        r.dyn_index = MLIR_INVALID_HANDLE;
+        r.elem_ty = e->i32;
+        return r;
+    }
     if (ex == e->compound_lv_expr) return *e->compound_lv;
     e->cur_line = ex->line;
     LVal r = {0};
@@ -2862,6 +2885,13 @@ static void emit_flat_call(E *e, Scope *sc, FuncSig *sig, VecExprPtr args,
     for (size_t i = 0; i < n_out; i++) {
         rts[i] = sig->flat_out_tys[i];
     }
+    if (e->err_count > 0) {
+        if (out_results) {
+            if (sig->sret) out_results[0] = MLIR_INVALID_HANDLE;
+            else for (size_t i = 0; i < n_out; i++) out_results[i] = MLIR_INVALID_HANDLE;
+        }
+        return;
+    }
     if (!sig->callee_attr) {
         sig->callee_attr = MLIR_CreateAttributeSymbolRef(e->ctx, sig->name);
     }
@@ -3264,6 +3294,7 @@ static Expr *generic_select(E *e, Scope *sc, Expr *ex) {
 static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
     EVal r = {0};
+    if (e->err_count > 0) return r;
     if (ex->kind == EX_GENERIC) {
         return emit_expr(e, sc, generic_select(e, sc, ex));
     }
@@ -4440,7 +4471,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             MLIR_ValueHandle b = emit_to_bool_i1(e, a);
-            r.val = emit_select(e, e->i32, b, emit_const_i32(e, 0), emit_const_i32(e, 1));
+            MLIR_ValueHandle zero = emit_const_i32(e, 0);
+            MLIR_ValueHandle one = emit_const_i32(e, 1);
+            r.val = emit_select(e, e->i32, b, zero, one);
             fact_put(e, r.val, FACT_RANGE, 1, true, 0);
             return r;
         }
@@ -4451,13 +4484,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             }
             if (ex->op == OP_AND || ex->op == OP_OR) {
                 EVal a = emit_expr(e, sc, ex->lhs);
+                if (e->err_count > 0) return r;
                 MLIR_ValueHandle ab = emit_to_bool_i1(e, a);
                 if (!e->target_wasm32) {
                     MLIR_BlockHandle rhs_b = new_cfg_block(e);
                     MLIR_BlockHandle merge_b = new_cfg_block(e);
                     MLIR_ValueHandle res = MLIR_AddBlockArgument(e->ctx, merge_b, e->i32, e->loc);
                     MLIR_ValueHandle short_val = emit_const_i32(e, ex->op == OP_AND ? 0 : 1);
-                    if (!e->terminated) {
+                    if (!e->terminated && e->err_count == 0) {
                         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
                         bd.loc = e->loc;
                         if (ex->op == OP_AND) {
@@ -4474,8 +4508,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     e->cur_block = rhs_b;
                     e->terminated = false;
                     EVal b = emit_expr(e, sc, ex->rhs);
+                    if (e->err_count > 0) return r;
                     MLIR_ValueHandle bv = bool_to_i32(e, emit_to_bool_i1(e, b));
-                    if (!e->terminated) {
+                    if (!e->terminated && e->err_count == 0) {
                         MLIR_Builder bd = MLIR_BuilderAtEnd(e->ctx, e->cur_block);
                         bd.loc = e->loc;
                         MLIR_BuildBr(&bd, OP_TYPE_CF_BR, merge_b, &bv, 1);
@@ -5550,6 +5585,7 @@ static void declare_without_init(E *e, Scope *sc, Stmt *st) {
 }
 
 static void emit_stmt(E *e, Scope *sc, Stmt *st) {
+    if (e->err_count > 0) return;
     if (e->terminated && st->kind != ST_LABEL) return;
     e->cur_line = st->line;
     switch (st->kind) {
@@ -8196,7 +8232,11 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     for (size_t i = 0; i < program->funcs.size; i++) {
         if (program->funcs.data[i]->is_forward) continue;
         MLIR_OpHandle fn = emit_func(&e, program->funcs.data[i]);
-        MLIR_AppendBlockOp(ctx, mb, fn);
+        if (fn != MLIR_INVALID_HANDLE) MLIR_AppendBlockOp(ctx, mb, fn);
+        if (e.err_count > 0) {
+            g_last_emit_errors = e.err_count;
+            return module;
+        }
     }
 
     // Emit extern declarations for any forward-declared functions that

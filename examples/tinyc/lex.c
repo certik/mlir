@@ -2,6 +2,67 @@
 
 #include "tinyc.h"
 
+// Convert a decimal mantissa (< 2^63) and base-10 exponent to IEEE-754 double.
+// The Dekker two-product in the net_exp in [-22, -1] branch relies on
+// non-contracted IEEE-754 rounding: if the host compiler fuses `f - qp` into
+// `fma(-q, p, f)` under `-O3 -march=native`, `qp_err` is subtracted twice (#383).
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#endif
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("fp-contract=off")))
+#endif
+static double lex_decimal_to_double(uint64_t mantissa, int net_exp) {
+    // mantissa < 2^63: its top 52 bits and its low 11 bits each convert to
+    // double exactly, so `f + lo` is the mantissa without any rounding. (Only
+    // int -> double conversions of non-negative values are used: tinyc lowers
+    // double -> int64 through i32, and this file has to self-host.)
+    double f = (double)(int64_t)(mantissa >> 11) * 2048.0;
+    double lo = (double)(int64_t)(mantissa & 2047u);
+    if (net_exp > 0) {
+        // Multiply by 10^net_exp using exact integer powers up to 10^22
+        // (which is exactly representable in f64), chunking larger exponents.
+        f += lo;
+        while (net_exp > 0) {
+            int chunk = net_exp > 22 ? 22 : net_exp;
+            double p = 1.0;
+            for (int k = 0; k < chunk; k++) p *= 10.0;
+            f *= p;
+            net_exp -= chunk;
+        }
+    } else if (net_exp < 0 && net_exp >= -22) {
+        // mantissa / 10^n with 10^n exact. Carry the low mantissa bits `lo`
+        // and the exact division remainder (Dekker two-product) into one
+        // correction term so 17+ digit literals round to the nearest ULP.
+        double p = 1.0;
+        for (int k = 0; k < -net_exp; k++) p *= 10.0;
+        double q = f / p;
+        double qp = q * p;
+        double t = 134217729.0 * q;   // 2^27 + 1
+        double qh = t - (t - q);
+        double ql = q - qh;
+        t = 134217729.0 * p;
+        double ph = t - (t - p);
+        double pl = p - ph;
+        double qp_err = ((qh * ph - qp) + qh * pl + ql * ph) + ql * pl;
+        double rem = ((f - qp) - qp_err) + lo;
+        f = q + rem / p;
+    } else if (net_exp == 0) {
+        f += lo;
+    } else if (net_exp < 0) {
+        f += lo;
+        int n = -net_exp;
+        while (n > 0) {
+            int chunk = n > 22 ? 22 : n;
+            double p = 1.0;
+            for (int k = 0; k < chunk; k++) p *= 10.0;
+            f /= p;
+            n -= chunk;
+        }
+    }
+    return f;
+}
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -439,60 +500,7 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     }
                 }
                 int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places + dropped_int;
-                // mantissa < 2^63: its top 52 bits and its low 11 bits each
-                // convert to double exactly, so `f + lo` is the mantissa
-                // without any rounding. (Only int -> double conversions of
-                // non-negative values are used: tinyc lowers double -> int64
-                // through i32, and this file has to self-host.)
-                double f = (double)(int64_t)(mantissa >> 11) * 2048.0;
-                double lo = (double)(int64_t)(mantissa & 2047u);
-                if (net_exp > 0) {
-                    // Multiply by 10^net_exp using exact integer powers
-                    // up to 10^22 (which is exactly representable in f64),
-                    // chunking larger exponents.
-                    f += lo;
-                    while (net_exp > 0) {
-                        int chunk = net_exp > 22 ? 22 : net_exp;
-                        double p = 1.0;
-                        for (int k = 0; k < chunk; k++) p *= 10.0;
-                        f *= p;
-                        net_exp -= chunk;
-                    }
-                } else if (net_exp < 0 && net_exp >= -22) {
-                    // mantissa / 10^n with 10^n exact. A mantissa above 2^53
-                    // is not exactly representable, so a plain
-                    // `(double)mantissa / p` rounds twice and is off by one
-                    // ulp for about one literal in ten with 17+ digits (M_PI
-                    // among them). Carry the low mantissa bits `lo` and the
-                    // exact division remainder (Dekker two-product; every
-                    // partial product below is exact, so FMA contraction
-                    // cannot change the result) into one correction term.
-                    double p = 1.0;
-                    for (int k = 0; k < -net_exp; k++) p *= 10.0;
-                    double q = f / p;
-                    double qp = q * p;
-                    double t = 134217729.0 * q;   // 2^27 + 1
-                    double qh = t - (t - q);
-                    double ql = q - qh;
-                    t = 134217729.0 * p;
-                    double ph = t - (t - p);
-                    double pl = p - ph;
-                    double qp_err = ((qh * ph - qp) + qh * pl + ql * ph) + ql * pl;
-                    double rem = ((f - qp) - qp_err) + lo;
-                    f = q + rem / p;
-                } else if (net_exp == 0) {
-                    f += lo;
-                } else if (net_exp < 0) {
-                    f += lo;
-                    int n = -net_exp;
-                    while (n > 0) {
-                        int chunk = n > 22 ? 22 : n;
-                        double p = 1.0;
-                        for (int k = 0; k < chunk; k++) p *= 10.0;
-                        f /= p;
-                        n -= chunk;
-                    }
-                }
+                double f = lex_decimal_to_double(mantissa, net_exp);
                 // Optional 'f'/'F' suffix marks the literal as TY_F32; otherwise
                 // (per C99) it has TY_F64 (double).
                 bool is_f64 = true;
@@ -819,44 +827,7 @@ TcTok tinyc_lex_number(string text, int line) {
             }
         }
         int net_exp = (exp_sign < 0 ? -exp : exp) - dec_places + dropped_int;
-        double f = (double)(int64_t)(mantissa >> 11) * 2048.0;
-        double lo = (double)(int64_t)(mantissa & 2047u);
-        if (net_exp > 0) {
-            f += lo;
-            while (net_exp > 0) {
-                int chunk = net_exp > 22 ? 22 : net_exp;
-                double p = 1.0;
-                for (int k = 0; k < chunk; k++) p *= 10.0;
-                f *= p;
-                net_exp -= chunk;
-            }
-        } else if (net_exp < 0 && net_exp >= -22) {
-            double p = 1.0;
-            for (int k = 0; k < -net_exp; k++) p *= 10.0;
-            double q = f / p;
-            double qp = q * p;
-            double t = 134217729.0 * q;
-            double qh = t - (t - q);
-            double ql = q - qh;
-            t = 134217729.0 * p;
-            double ph = t - (t - p);
-            double pl = p - ph;
-            double qp_err = ((qh * ph - qp) + qh * pl + ql * ph) + ql * pl;
-            double rem = ((f - qp) - qp_err) + lo;
-            f = q + rem / p;
-        } else if (net_exp == 0) {
-            f += lo;
-        } else if (net_exp < 0) {
-            f += lo;
-            int n = -net_exp;
-            while (n > 0) {
-                int chunk = n > 22 ? 22 : n;
-                double p = 1.0;
-                for (int k = 0; k < chunk; k++) p *= 10.0;
-                f /= p;
-                n -= chunk;
-            }
-        }
+        double f = lex_decimal_to_double(mantissa, net_exp);
         bool is_f64 = true;
         if (j < sz && (s[j] == 'f' || s[j] == 'F')) { j++; is_f64 = false; }
         TcTok t = {0}; t.kind = TC_TK_FLOAT_LIT; t.d.float_value = f;

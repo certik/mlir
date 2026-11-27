@@ -1798,3 +1798,8 @@ name = "pp_nested_self_macro"
 targets = ["native", "wasm", "macho", "elf"]
 # Function-like macro argument prescan allows nested same-name calls (#335).
 expected_stdout = "5 4 10\n"
+
+[[test]]
+name = "elf_main_argc_argv"
+targets = ["elf"]
+expected_stdout = "argc=1\nargv0=ok\n"
