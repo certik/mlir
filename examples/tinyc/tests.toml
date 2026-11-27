@@ -1780,3 +1780,8 @@ expected_stdout = "-56 255 34 4464 65535\n[\\0A][  -42][-42  ][-0042][+5][ 5]\n[
 name = "global_string_concat"
 targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "9 13\n[abc] 3\n[de] 2\n[f] 1\nhello, world\n"
+
+[[test]]
+name = "elf_main_argc_argv"
+targets = ["elf"]
+expected_stdout = "argc=1\nargv0=ok\n"
