@@ -1782,6 +1782,13 @@ targets = ["native", "wasm", "macho", "elf"]
 expected_stdout = "9 13\n[abc] 3\n[de] 2\n[f] 1\nhello, world\n"
 
 [[test]]
+name = "octal_and_declarators"
+targets = ["native", "wasm", "macho", "elf"]
+# Octal escapes (\1..\377), parenthesized fn name, block-scope struct tag,
+# 3-level pointers (char ***), and long double (#339).
+expected_stdout = "1 10 65 255 1 65\n42\nZ 123\nH\n8 3.5\n"
+
+[[test]]
 name = "volatile_qualifier"
 targets = ["native", "wasm", "macho", "elf"]
 # volatile / restrict / register qualifiers (#333).

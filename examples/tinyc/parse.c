@@ -1050,6 +1050,15 @@ static bool parse_base_type2(P *p, TypeKind *out, bool *out_was_char,
         else if (saw_short_kw)          *out_int_bits = 16;
         *out_is_bool = saw_bool_kw && !saw_char_kw && !saw_short_kw;
     }
+    if (n_long_kw == 1 && !saw_int_kw && !saw_signedness_kw &&
+        !saw_short_kw && !saw_char_kw && !saw_bool_kw &&
+        cur(p).kind == TC_TK_KW_DOUBLE) {
+        p->i++;
+        *out = TY_F64;
+        *out_is_long = false;
+        skip_const(p);
+        return true;
+    }
     if (n_long_kw > 0) {
         bool is_64 = (n_long_kw >= 2) || !p->target_wasm32;
         *out = is_64 ? TY_I64 : TY_I32;
@@ -1420,6 +1429,10 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             sn.kind = TC_TK_IDENT;
             tc_tok_set_text(&sn, sd->name);
             sn.line = line;
+            if (cur(p).kind == TC_TK_SEMI) {
+                if (require_semi) p->i++;
+                return new_stmt(p, ST_BLOCK, line);
+            }
         } else {
             p->i++;
             sn = cur(p);
@@ -2016,6 +2029,19 @@ static bool parse_sig_type(P *p, Type *out) {
         // storage kind collides (both TY_I32). The storage width is
         // tracked by `kind` (TY_I32 / TY_I64), independent of this
         // semantic tag.
+        if (n_long == 1 && !saw_short && !saw_char && !saw_bool && !saw_unsigned &&
+            cur(p).kind == TC_TK_KW_DOUBLE) {
+            p->i++;
+            out->kind = TY_F64;
+            skip_const(p);
+            if (accept(p, TC_TK_STAR)) {
+                out->kind = TY_PTR_I32; out->ptr_is_f64 = true;
+                skip_const(p);
+                while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            }
+            skip_const(p);
+            return true;
+        }
         bool long_storage_64 = (n_long >= 2) || (n_long == 1 && !p->target_wasm32);
         out->kind = long_storage_64 ? TY_I64 : TY_I32;
         if (n_long >= 1) out->int_bits = 64;
@@ -2033,7 +2059,7 @@ static bool parse_sig_type(P *p, Type *out) {
             out->kind = saw_char ? TY_PTR_CHAR : TY_PTR_I32;
             if (long_storage_64 && !saw_char) out->ptr_is_i64 = true;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
         return true;
     }
@@ -2042,7 +2068,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_I32;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
         skip_const(p);
         return true;
@@ -2052,7 +2078,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_I32; out->ptr_is_f32 = true;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
         skip_const(p);
         return true;
@@ -2062,7 +2088,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_I32; out->ptr_is_f64 = true;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
         skip_const(p);
         return true;
@@ -2073,7 +2099,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_VOID;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         } else {
             out->kind = TY_VOID;
         }
@@ -2086,7 +2112,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_CHAR;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         } else {
             out->kind = TY_I32;
             out->int_bits = 8;
@@ -2104,7 +2130,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_STRUCT;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
         skip_const(p);
         return true;
@@ -2120,7 +2146,7 @@ static bool parse_sig_type(P *p, Type *out) {
         if (accept(p, TC_TK_STAR)) {
             out->kind = TY_PTR_I32;
             skip_const(p);
-            if (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
+            while (accept(p, TC_TK_STAR)) { wrap_ptr_to_ptr(p, out); skip_const(p); }
         }
         skip_const(p);
         return true;
@@ -2164,10 +2190,12 @@ static bool parse_sig_type(P *p, Type *out) {
                 }
                 // else: ignore (e.g. typedef'd pointer + extra '*' not supported)
                 skip_const(p);
-                if (accept(p, TC_TK_STAR) &&
+                while (accept(p, TC_TK_STAR) &&
                     (out->kind == TY_PTR_I32 || out->kind == TY_PTR_STRUCT ||
-                     out->kind == TY_PTR_CHAR || out->kind == TY_PTR_VOID)) {
+                     out->kind == TY_PTR_CHAR || out->kind == TY_PTR_VOID ||
+                     out->kind == TY_PTR_PTR)) {
                     wrap_ptr_to_ptr(p, out);
+                    skip_const(p);
                 }
             }
             skip_const(p);
@@ -2221,8 +2249,13 @@ static Func *parse_func(P *p) {
     // macro expansion in corec/platform/platform_wasm.c produces this
     // shape after preprocessing: `uint32_t __attribute__((...)) name(...)`).
     parse_attributes(p, &attrs);
+    bool paren_name = (cur(p).kind == TC_TK_LPAREN &&
+                       peek(p, 1).kind == TC_TK_IDENT &&
+                       peek(p, 2).kind == TC_TK_RPAREN);
+    if (paren_name) p->i++;
     TcTok name = cur(p);
     expect(p, TC_TK_IDENT, str_lit("expected function name"));
+    if (paren_name) expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
     expect(p, TC_TK_LPAREN, str_lit("expected '('"));
     Func *f = arena_new(p->arena, Func);
     *f = (Func){0};
