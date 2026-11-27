@@ -2583,14 +2583,13 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
             StructDef *sd = find_struct(e, t.struct_name);
             if (sd) {
                 MLIR_TypeHandle st_ty = find_struct_type(e, sd);
-                MLIR_ValueHandle save_ptr = MLIR_INVALID_HANDLE;
-                MLIR_BlockHandle save_blk = e->cur_block;
                 MLIR_ValueHandle slot = emit_alloca(e, st_ty);
                 EVal cv = emit_expr(e, sc, arg->lhs);
                 MLIR_ValueHandle cb = emit_to_bool_i1(e, cv);
                 MLIR_BlockHandle then_blk = new_cfg_block(e);
                 MLIR_BlockHandle else_blk = new_cfg_block(e);
                 MLIR_BlockHandle merge_blk = new_cfg_block(e);
+                emit_cond_branch(e, cb, then_blk, else_blk);
                 e->cur_block = then_blk; e->terminated = false;
                 StructDef *tsd = NULL;
                 MLIR_ValueHandle tsrc = resolve_struct_source(e, sc, arg->rhs, &tsd);
@@ -2605,10 +2604,7 @@ static MLIR_ValueHandle resolve_struct_source(E *e, Scope *sc, Expr *arg, Struct
                     emit_struct_copy(e, slot, esrc, sd);
                 }
                 emit_branch(e, merge_blk);
-                e->cur_block = save_blk; e->terminated = false;
-                emit_cond_branch(e, cb, then_blk, else_blk);
                 e->cur_block = merge_blk; e->terminated = false;
-                (void)save_ptr;
                 *out_sd = sd;
                 return slot;
             }
