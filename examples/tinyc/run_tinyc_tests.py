@@ -166,38 +166,13 @@ def use_unity_source() -> bool:
     return not (IS_WIN and TARGET == "native")
 
 
-def uses_inline_platform() -> bool:
-    # macOS and Linux native link the real corec platform_*.c directly:
-    #   * macOS:  platform_macos.c is libc-based (writev / readv / mmap).
-    #   * Linux:  platform_linux.c issues raw syscalls via __builtin_syscall6,
-    #             which tinyC lowers on the native llc/host-link path too — the
-    #             driver defines @__tinyc_syscall6 as an x86_64 `syscall` (see
-    #             inject_syscall6_definition in driver.c), mirroring the ELF
-    #             backend's thunk.
-    # Windows native does not reach this at all: it uses the no-runtime path
-    # (use_unity_source() is False there), compiling each self-contained test
-    # straight against the MSVCRT without any corec platform layer.
-    #
-    # Returning True synthesizes a ~45-line inline platform shim (as Python
-    # strings) into the unity instead of #include'ing the real platform_*.c.
-    # That now happens ONLY for the macho-llvm target cross-compiled on a
-    # non-Apple host (e.g. Linux building a Mach-O), where libSystem cannot be
-    # linked: the inline shim is a portable stand-in. On an actual macOS host
-    # macho-llvm uses the real platform_macos.c. This is the second of the two
-    # documented exceptions to "all OS access goes via corec/platform.h" — see
-    # doc/platform_paths.md.
-    if sys.platform.startswith("darwin"):
-        return False
-    if sys.platform.startswith("linux"):
-        return TARGET == "macho" and MACHO_BACKEND == "llvm"
-    return TARGET == "native" or (TARGET == "macho" and MACHO_BACKEND == "llvm")
-
-
 def platform_source_for_unity() -> Path:
     if uses_wasm_runtime():
         return COREC_STDLIB_COREC_DIR / "platform" / "platform_wasm.c"
     if TARGET == "elf":
         return COREC_STDLIB_COREC_DIR / "platform" / "platform_linux.c"
+    if TARGET == "macho":
+        return COREC_STDLIB_COREC_DIR / "platform" / "platform_macos.c"
     if IS_WIN:
         return COREC_STDLIB_COREC_DIR / "platform" / "platform_windows.c"
     if sys.platform.startswith("darwin"):
@@ -254,71 +229,10 @@ def write_unity_source(name: str, srcs: list[Path]) -> Path:
     lines += [""]
     for src in COREC_BASE_SOURCES:
         lines.append(f'#include "{_inc(COREC_STDLIB_COREC_DIR / src)}"')
-    stdlib_sources = list(STDLIB_SOURCES)
-    if TARGET == "native":
-        # Native tests link against the host C library; use its variadic printf
-        # ABI instead of compiling corec-stdlib's printf with tinyC. Every other
-        # target (incl. ELF, whose x64 backend has real SSE2 floating point)
-        # compiles the real corec-stdlib/stdlib/printf.c.
-        stdlib_sources.remove("stdlib/printf.c")
-    for src in stdlib_sources:
+    for src in STDLIB_SOURCES:
         lines.append(f'#include "{_inc(COREC_STDLIB_DIR / src)}"')
     lines += ["", ""]
-    if uses_inline_platform():
-        prefix = "_" if (TARGET == "macho" or IS_WIN) else ""
-        if IS_WIN:
-            o_creat = 0x0100
-            o_trunc = 0x0200
-        else:
-            o_creat = 0x0200 if sys.platform.startswith("darwin") else 0x40
-            o_trunc = 0x0400 if sys.platform.startswith("darwin") else 0x200
-        lines += [
-            f"extern long {prefix}write(int fd, const void *buf, unsigned long n);",
-            f"extern long {prefix}read(int fd, void *buf, unsigned long n);",
-            f"extern int {prefix}open(const char *path, int flags, ...);",
-            f"extern int {prefix}close(int fd);",
-            f"extern long {prefix}lseek(int fd, long offset, int whence);",
-            f"extern void {prefix}exit(int status);",
-            "static char tinyc_static_heap_raw[16842752];",
-            "void ensure_heap_initialized(void) { }",
-            "void platform_init(int argc, char **argv, char **envp) { (void)argc; (void)argv; (void)envp; buddy_init(); }",
-            "void *platform_heap_base(void) { unsigned long p = (unsigned long)tinyc_static_heap_raw; p = (p + 65535) & ~65535UL; return (void*)p; }",
-            "unsigned long platform_heap_size(void) { return 16777216; }",
-            "void *platform_heap_grow(unsigned long n) { (void)n; return (void*)0; }",
-            "unsigned int platform_fd_write(int fd, const ciovec_t *iovs, unsigned long iovs_len, unsigned long *nwritten) {",
-            "  unsigned long total = 0;",
-            f"  for (unsigned long i = 0; i < iovs_len; i = i + 1) total = total + (unsigned long){prefix}write(fd, iovs[i].buf, iovs[i].buf_len);",
-            "  *nwritten = total; return 0;",
-            "}",
-            f"void platform_exit(int status) {{ {prefix}exit(status); }}",
-            "int platform_args_sizes_get(unsigned long *argc, unsigned long *argv_buf_size) { *argc = 0; *argv_buf_size = 0; return 0; }",
-            "int platform_args_get(char **argv, char *argv_buf) { (void)argv; (void)argv_buf; return 0; }",
-            "int platform_environ_sizes_get(unsigned long *n, unsigned long *s) { *n = 0; *s = 0; return 0; }",
-            "int platform_environ_get(char **e, char *b) { (void)e; (void)b; return 0; }",
-            "int platform_path_open(const char *path, unsigned long path_len, unsigned long long rights, int oflags) {",
-            "  int flags = 0;",
-            "  int has_read = (rights & 2) != 0;",
-            "  int has_write = (rights & 64) != 0;",
-            "  if (has_read && has_write) flags = 2; else if (has_write) flags = 1;",
-            f"  if (oflags & 1) flags = flags | {o_creat};",
-            f"  if (oflags & 8) flags = flags | {o_trunc};",
-            f"  (void)path_len; return {prefix}open(path, flags, 0644);",
-            "}",
-            f"int platform_fd_close(int fd) {{ return {prefix}close(fd); }}",
-            "int platform_fd_read(int fd, const iovec_t *iovs, unsigned long iovs_len, unsigned long *nread) {",
-            "  unsigned long total = 0;",
-            f"  for (unsigned long i = 0; i < iovs_len; i = i + 1) total = total + (unsigned long){prefix}read(fd, iovs[i].iov_base, iovs[i].iov_len);",
-            "  *nread = total; return 0;",
-            "}",
-            f"int platform_fd_seek(int fd, long long offset, int whence, unsigned long long *newoffset) {{ long r = {prefix}lseek(fd, (long)offset, whence); *newoffset = (unsigned long long)r; return r < 0; }}",
-            f"int platform_fd_tell(int fd, unsigned long long *offset) {{ long r = {prefix}lseek(fd, 0, 1); *offset = (unsigned long long)r; return r < 0; }}",
-            "int platform_read_file_mmap(const char *filename, unsigned long long *out_handle, void **out_data, unsigned long *out_size) { (void)filename; *out_handle = 0; *out_data = (void*)0; *out_size = 0; return 0; }",
-            "void platform_file_unmap(unsigned long long handle) { (void)handle; }",
-            "double fast_sqrt(double x) { return __builtin_sqrt(x); }",
-            "float fast_sqrtf(float x) { return __builtin_sqrtf(x); }",
-        ]
-    else:
-        lines.append(f'#include "{_inc(platform_source_for_unity())}"')
+    lines.append(f'#include "{_inc(platform_source_for_unity())}"')
     if host_main and not uses_wasm_runtime():
         if TARGET == "macho" and MACHO_BACKEND == "llvm":
             lines += [
