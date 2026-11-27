@@ -384,6 +384,30 @@ MLIR_ValueHandle MLIR_BuildBinary(MLIR_Builder *b, MLIR_OpType t,
 MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_ValueHandle x);
 
+MLIR_OpHandle MLIR_BuildVoidBinary(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_ValueHandle x, MLIR_ValueHandle y);
+
+MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_AttrKey key, MLIR_AttributeHandle val);
+
+MLIR_ValueHandle MLIR_BuildUnaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey key, MLIR_AttributeHandle val);
+
+MLIR_ValueHandle MLIR_BuildBinaryAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey key, MLIR_AttributeHandle val);
+
+MLIR_ValueHandle MLIR_BuildUnary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1);
+
+MLIR_ValueHandle MLIR_BuildBinary2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_TypeHandle rt, MLIR_ValueHandle x, MLIR_ValueHandle y,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1);
+
 MLIR_ValueHandle MLIR_BuildConstantInt(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, int64_t v);
 
@@ -442,6 +466,12 @@ void MLIR_SetOpAttr(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_AttrKey key, MLIR_
 // The op's type, as created. For its name use
 // MLIR_GetOpTypeName(ctx, MLIR_GetOpType(ctx, op)).
 MLIR_OpType MLIR_GetOpType(MLIR_Context *ctx, MLIR_OpHandle op);
+// Change a region-less op's type to `new_type`, preserving its operands,
+// results, attributes, successors, and position in its parent block.
+// Mutates `op` in place when supported by the backend, or replaces `op`
+// (redirecting all uses of its results and erasing `op`) otherwise.
+// Returns the handle of the resulting op.
+MLIR_OpHandle MLIR_RenameOp(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType new_type);
 MLIR_LocationHandle MLIR_GetOpLocation(MLIR_Context *ctx, MLIR_OpHandle op);
 size_t MLIR_GetOpNumOperands(MLIR_Context *ctx, MLIR_OpHandle op);
 MLIR_ValueHandle MLIR_GetOpOperand(MLIR_Context *ctx, MLIR_OpHandle op, size_t idx);
@@ -766,6 +796,11 @@ void MLIR_ReplaceAllUsesOfValue(MLIR_Context *ctx,
 // the storage to the arena.
 void MLIR_EraseOp(MLIR_Context *ctx, MLIR_OpHandle op);
 
+// Batch-erases `ops[0..n)` in order. Equivalent to calling MLIR_EraseOp on
+// each element, but the native backend compacts each affected block in a
+// single O(block.n_ops) pass instead of shifting on every erase.
+void MLIR_EraseOps(MLIR_Context *ctx, const MLIR_OpHandle *ops, size_t n);
+
 // Removes `op` from its parent block (if any) and keeps it: the handle stays
 // valid, and its operands, results, attributes and regions are unchanged.
 // Insert it again with MLIR_AppendBlockOp / MLIR_InsertBlockOpAtIndex, or
@@ -987,6 +1022,7 @@ typedef enum {
     MLIR_ORDER_PO
 } MLIR_BlockOrder;
 
+size_t MLIR_GetBlockIndex(MLIR_Context *ctx, MLIR_BlockHandle block);
 size_t MLIR_GetBlockOrder(MLIR_Context *ctx, MLIR_RegionHandle region,
                           MLIR_BlockOrder order, Arena *out,
                           MLIR_BlockHandle **out_blocks);
@@ -1045,6 +1081,11 @@ MLIR_TypeHandle MLIR_GetAttributeTypeValue(MLIR_Context *ctx, MLIR_AttributeHand
 // (MLIR_GetAttributeAsString) is made on demand.
 size_t MLIR_GetAttributeDenseSize(MLIR_Context *ctx, MLIR_AttributeHandle attr);
 int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle attr, size_t idx);
+// Copy up to `cap` elements of a dense integer array attribute into `out`
+// (as int32_t) and return the total number of elements in the attribute
+// (0 if not a dense integer array).
+size_t MLIR_GetAttributeDenseI32(MLIR_Context *ctx, MLIR_AttributeHandle attr,
+                                 int32_t *out, size_t cap);
 
 // -----------------------------------------------------------------------------
 // LLVM-level completeness: fast-math flags, splats, constant matchers,
