@@ -2054,16 +2054,37 @@ extern "C" int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_Attribu
     return (*(d.getValues<llvm::APInt>().begin() + i)).getSExtValue();
 }
 
-extern "C" const int32_t *MLIR_GetAttributeDenseI32Data(MLIR_Context *ctx, MLIR_AttributeHandle h, size_t *out_n) {
+extern "C" size_t MLIR_GetAttributeDenseI32(MLIR_Context *ctx, MLIR_AttributeHandle h,
+                                            int32_t *out, size_t cap) {
     (void)ctx;
     mlir::Attribute a = attrF(h);
-    if (auto d = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(a)) {
+    if (auto d = llvm::dyn_cast_or_null<mlir::DenseI32ArrayAttr>(a)) {
         llvm::ArrayRef<int32_t> ref = d.asArrayRef();
-        if (out_n) *out_n = ref.size();
-        return ref.data();
+        size_t n = ref.size();
+        size_t copy = n < cap ? n : cap;
+        if (copy && out) memcpy(out, ref.data(), copy * sizeof(int32_t));
+        return n;
     }
-    if (out_n) *out_n = 0;
-    return nullptr;
+    if (auto d = llvm::dyn_cast_or_null<mlir::DenseI64ArrayAttr>(a)) {
+        llvm::ArrayRef<int64_t> ref = d.asArrayRef();
+        size_t n = ref.size();
+        size_t copy = n < cap ? n : cap;
+        if (copy && out) {
+            for (size_t i = 0; i < copy; i++) out[i] = (int32_t)ref[i];
+        }
+        return n;
+    }
+    if (auto d = llvm::dyn_cast_or_null<mlir::DenseIntElementsAttr>(a)) {
+        size_t n = d.getNumElements();
+        size_t copy = n < cap ? n : cap;
+        if (copy && out) {
+            auto it = d.getValues<llvm::APInt>().begin();
+            for (size_t i = 0; i < copy; i++, ++it)
+                out[i] = (int32_t)(*it).getSExtValue();
+        }
+        return n;
+    }
+    return 0;
 }
 
 extern "C" MLIR_AttrKey MLIR_InternAttrKey(MLIR_Context *ctx, string name) {

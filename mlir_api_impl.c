@@ -3369,14 +3369,25 @@ int64_t MLIR_GetAttributeDenseElement(MLIR_Context *ctx, MLIR_AttributeHandle ah
     return (int64_t)(((uint64_t)AX(ctx)[r->first + 2 * idx + 1] << 32) | AX(ctx)[r->first + 2 * idx]);
 }
 
-const int32_t *MLIR_GetAttributeDenseI32Data(MLIR_Context *ctx, MLIR_AttributeHandle ah, size_t *out_n) {
-    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDenseI32Data");
-    if (r->kind != AK_DENSE_I32) {
-        if (out_n) *out_n = 0;
-        return NULL;
+size_t MLIR_GetAttributeDenseI32(MLIR_Context *ctx, MLIR_AttributeHandle ah,
+                                 int32_t *out, size_t cap) {
+    const IR_Attr *r = ATTR_REC(ctx, ah, "MLIR_GetAttributeDenseI32");
+    if (r->kind == AK_DENSE_I32) {
+        size_t n = r->n;
+        size_t copy = n < cap ? n : cap;
+        if (copy && out) memcpy(out, AX(ctx) + r->first, copy * sizeof(int32_t));
+        return n;
     }
-    if (out_n) *out_n = r->n;
-    return (const int32_t *)(AX(ctx) + r->first);
+    if (r->kind == AK_DENSE_I64) {
+        size_t n = r->n;
+        size_t copy = n < cap ? n : cap;
+        if (copy && out) {
+            const uint32_t *ax = AX(ctx) + r->first;
+            for (size_t i = 0; i < copy; i++) out[i] = (int32_t)ax[2 * i];
+        }
+        return n;
+    }
+    return 0;
 }
 
 // Value accessors
