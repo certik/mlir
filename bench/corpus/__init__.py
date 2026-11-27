@@ -34,8 +34,7 @@ HERE = Path(__file__).resolve().parent
 # --- CoreMark --------------------------------------------------------------
 def _coremark_unity(src: Path, work: Path, for_tinyc: bool) -> Path:
     """coremark.h has no include guard: include it once and drop the per-file
-    includes. For tinyc, move single-line global pointer-array initializers
-    (`T *name[N] = {...};`, unsupported: #317) into an init function."""
+    includes."""
     parts = ["#include <stddef.h>", "#include <stdio.h>", "#include <stdlib.h>",
              "#include <string.h>", '#include "coremark.h"', "#define main bench_main"]
     for f in ("core_list_join.c", "core_main.c", "core_matrix.c", "core_state.c",
@@ -46,19 +45,6 @@ def _coremark_unity(src: Path, work: Path, for_tinyc: bool) -> Path:
                             text, flags=re.M))
     parts += ["#undef main", '#include "core_portme.c"']
     body = "\n".join(parts) + "\n"
-    if for_tinyc:
-        assigns = []
-
-        def repl(m):
-            decl, name, n, items = m.groups()
-            for i, item in enumerate(x.strip() for x in items.split(",")):
-                assigns.append(f"    {name}[{i}] = {item};")
-            return f"{decl}{name}[{n}];"
-
-        body = re.sub(r"^((?:static )?[A-Za-z_][A-Za-z0-9_ ]*\*\s*)(\w+)\[(\d+)\]\s*=\s*\{([^{}]*)\};",
-                      repl, body, flags=re.M)
-        body += ("static void bench_init_globals(void) {\n" + "\n".join(assigns) +
-                 "\n}\n#define BENCH_INIT_GLOBALS bench_init_globals\n")
     body += '#include "tinyc_rt.c"\n'
     out = work / f"coremark.{'tinyc' if for_tinyc else 'cc'}.c"
     out.write_text(body)
@@ -90,7 +76,7 @@ CORPUS = [
         "tinyc_flags": ["--host-varargs"],
         "argv": lambda src: [],
         "check": "Correct operation validated",
-        "blockers": "workaround: global pointer-array init rewrite (#317)",
+        "blockers": "",
     },
     {
         "name": "lua",

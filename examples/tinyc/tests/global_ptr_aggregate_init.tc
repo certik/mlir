@@ -1,0 +1,34 @@
+extern int printf(const char *fmt, ...);
+
+int g_val = 42;
+int g_arr[3] = { 10, 20, 30 };
+
+struct S {
+    const char *name;
+    int *p;
+    int tag;
+};
+
+struct S g_s = { "abc", &g_val, 7 };
+const char *names[] = { "Static", "Heap", "Stack" };
+static unsigned char *pats[3] = {
+    (unsigned char *)"5012",
+    (unsigned char *)0,
+    (unsigned char *)"+122"
+};
+struct S g_table[] = {
+    { "first", &g_val, 1 },
+    { "second", g_arr, 2 },
+    { 0, 0, 3 }
+};
+
+int main(void) {
+    printf("%s %d %d\n", g_s.name, *g_s.p, g_s.tag);
+    printf("%s %s %s %d\n", names[0], names[1], names[2], (int)(sizeof(names) / sizeof(names[0])));
+    printf("%s %d %s\n", (const char *)pats[0], pats[1] == 0 ? 1 : 0, (const char *)pats[2]);
+    printf("%s %d %s %d %d\n",
+           g_table[0].name, *g_table[0].p,
+           g_table[1].name, g_table[1].p[1],
+           g_table[2].name == 0 ? 1 : 0);
+    return 0;
+}

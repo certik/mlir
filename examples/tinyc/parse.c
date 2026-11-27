@@ -3265,9 +3265,11 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                         }
                         if (lit.kind == TC_TK_LBRACE &&
                             (g.type.kind == TY_STRUCT ||
-                             g.type.kind == TY_ARRAY_STRUCT)) {
-                            // Struct (array) initializer: the emitter
-                            // folds it into the global's constant data.
+                             g.type.kind == TY_ARRAY_STRUCT ||
+                             g.type.kind == TY_ARRAY_PTR_CHAR ||
+                             g.type.kind == TY_ARRAY_PTR_STRUCT)) {
+                            // Struct / pointer-array initializer: the emitter
+                            // folds it into the global's constant data + relocs.
                             g.init_expr = parse_aggregate_init(&p, g.type);
                         } else if (lit.kind == TC_TK_LBRACE) {
                             // Aggregate initializer for a global array.

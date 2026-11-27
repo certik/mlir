@@ -1097,11 +1097,41 @@ static void emit_function(MLIR_Context *ctx, Buf *out, MLIR_OpHandle fn, int att
 // pointers, see mlir_llvm_type_layout.h) is `b`, as LLVM IR: e.g.
 // `{ i32 1, [2 x i8] [i8 104, i8 0] }`. An all-zero value prints as
 // `zeroinitializer`; a pointer can only be null.
+typedef struct {
+    unsigned off;
+    string target;
+} LlvmIrReloc;
+
+typedef struct {
+    LlvmIrReloc *items;
+    size_t n, cap;
+} LlvmIrRelocList;
+
+static void llvm_ir_on_reloc(void *ud, unsigned off, string target) {
+    LlvmIrRelocList *rl = (LlvmIrRelocList *)ud;
+    if (rl->n == rl->cap) {
+        rl->cap = rl->cap ? rl->cap * 2 : 8;
+        rl->items = (LlvmIrReloc *)realloc(rl->items, rl->cap * sizeof(LlvmIrReloc));
+    }
+    rl->items[rl->n].off = off;
+    rl->items[rl->n].target = target;
+    rl->n++;
+}
+
+static bool llvm_ir_has_reloc_in(const LlvmIrReloc *relocs, size_t n,
+                                 unsigned start, unsigned sz) {
+    for (size_t i = 0; i < n; i++) {
+        if (relocs[i].off >= start && relocs[i].off < start + sz) return true;
+    }
+    return false;
+}
+
 static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
-                              const uint8_t *b) {
+                              const uint8_t *b, const LlvmIrReloc *relocs,
+                              size_t n_relocs, unsigned base_off) {
     unsigned sz = llvm_type_size(ctx, ty, 8);
-    bool zero = true;
-    for (unsigned i = 0; i < sz; i++) {
+    bool zero = !llvm_ir_has_reloc_in(relocs, n_relocs, base_off, sz);
+    for (unsigned i = 0; zero && i < sz; i++) {
         if (b[i]) { zero = false; break; }
     }
     if ((MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_ARRAY) || (MLIR_GetTypeKind(ctx, ty) == MLIR_TYPE_KIND_LLVM_STRUCT)) {
@@ -1127,7 +1157,7 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
             if (i) buf_cstr(out, ", ");
             print_type(out, ctx, et);
             buf_putc(out, ' ');
-            print_const_bytes(out, ctx, et, b + off);
+            print_const_bytes(out, ctx, et, b + off, relocs, n_relocs, base_off + off);
         }
         buf_cstr(out, arr ? "]" : " }");
         return;
@@ -1135,6 +1165,12 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
     uint64_t bits = 0;
     for (unsigned i = 0; i < sz && i < 8; i++) bits |= (uint64_t)b[i] << (8 * i);
     if (is_llvm_ptr(ctx, ty)) {
+        for (size_t i = 0; i < n_relocs; i++) {
+            if (relocs[i].off == base_off) {
+                buf_printf(out, "@%.*s", (int)relocs[i].target.size, relocs[i].target.str);
+                return;
+            }
+        }
         buf_cstr(out, "null");
     } else if (is_float_w(ctx, ty, 32)) {
         uint32_t b32 = (uint32_t)bits;
@@ -1267,12 +1303,15 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
                     // MLIR_CreateLLVMGlobalArrayInit's upstream impl).
                     unsigned sz = gty != MLIR_INVALID_HANDLE ? llvm_type_size(ctx, gty, 8) : 0;
                     uint8_t *img = sz ? (uint8_t *)calloc(sz, 1) : NULL;
-                    if (img && llvm_global_init_bytes(ctx, gop, gty, 8, img, sz)) {
+                    LlvmIrRelocList rl = {0};
+                    if (img && llvm_global_init_bytes_relocs(ctx, gop, gty, 8, img, sz,
+                                                             llvm_ir_on_reloc, &rl)) {
                         Buf tmp = {0};
-                        print_const_bytes(&tmp, ctx, gty, img);
+                        print_const_bytes(&tmp, ctx, gty, img, rl.items, rl.n, 0);
                         buf_putc(&tmp, '\0');
                         init = tmp.data;
                     }
+                    free(rl.items);
                     free(img);
                     break;
                 }

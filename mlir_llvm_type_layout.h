@@ -129,6 +129,12 @@ size_t llvm_position_indices(MLIR_Context *ctx, MLIR_AttributeHandle a,
 bool llvm_aggregate_elem(MLIR_Context *ctx, MLIR_TypeHandle ty,
                          const int64_t *idx, size_t n, unsigned ptr_bytes,
                          unsigned *off, MLIR_TypeHandle *elem);
+typedef void (*LlvmGlobalRelocFn)(void *ud, unsigned off, string target);
+
 bool llvm_global_init_bytes(MLIR_Context *ctx, MLIR_OpHandle gop,
                             MLIR_TypeHandle gty, unsigned ptr_bytes,
                             uint8_t *buf, unsigned size);
+bool llvm_global_init_bytes_relocs(MLIR_Context *ctx, MLIR_OpHandle gop,
+                                   MLIR_TypeHandle gty, unsigned ptr_bytes,
+                                   uint8_t *buf, unsigned size,
+                                   LlvmGlobalRelocFn on_reloc, void *ud);

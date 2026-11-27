@@ -1542,6 +1542,24 @@ static bool x64_module_has_global_sym(MLIR_Context *ctx, MLIR_BlockHandle mb, st
     return false;
 }
 
+typedef struct {
+    uint32_t base_off;
+    PendingPtrReloc **pend;
+    size_t *pend_cap;
+    size_t *n_pend;
+} X64RelocCtx;
+
+static void x64_on_global_reloc(void *ud, unsigned rel_off, string target) {
+    X64RelocCtx *rc = (X64RelocCtx *)ud;
+    if (*rc->n_pend == *rc->pend_cap) {
+        *rc->pend_cap = *rc->pend_cap ? *rc->pend_cap * 2 : 4;
+        *rc->pend = (PendingPtrReloc *)realloc(*rc->pend, *rc->pend_cap * sizeof(**rc->pend));
+    }
+    (*rc->pend)[*rc->n_pend].slot_off = rc->base_off + rel_off;
+    (*rc->pend)[*rc->n_pend].target = target;
+    (*rc->n_pend)++;
+}
+
 // Allocate one global in .data, serialize its initializer, and register it in gm.
 static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm, Buf *data,
                                    PendingPtrReloc **pend, size_t *pend_cap, size_t *n_pend) {
@@ -1563,9 +1581,16 @@ static void x64_register_global_op(MLIR_Context *ctx, MLIR_OpHandle op, GMap *gm
 
     MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
     if (va) serialize_global_value_attr(ctx, va, name, data, off, sz);
-    else if (t == MLIR_INVALID_HANDLE ||
-             !llvm_global_init_bytes(ctx, op, t, 8, data->data + off, (unsigned)sz))
-        parse_trivial_ptr_global_init(ctx, op, name, off, sz, pend, pend_cap, n_pend);
+    else {
+        size_t save_pend = *n_pend;
+        X64RelocCtx rc = { off, pend, pend_cap, n_pend };
+        if (t == MLIR_INVALID_HANDLE ||
+            !llvm_global_init_bytes_relocs(ctx, op, t, 8, data->data + off, (unsigned)sz,
+                                           x64_on_global_reloc, &rc)) {
+            *n_pend = save_pend;
+            parse_trivial_ptr_global_init(ctx, op, name, off, sz, pend, pend_cap, n_pend);
+        }
+    }
 
     x64_data_finish_global(gm, data, name, off, sz);
 }

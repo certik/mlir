@@ -7522,6 +7522,7 @@ typedef struct {
     size_t depth;
     MLIR_TypeHandle ty;
     MLIR_AttributeHandle val;
+    string ptr_sym;
     bool clear;
 } GInitSlot;
 
@@ -7625,7 +7626,7 @@ static bool gconst_is_zero(E *e, Expr *ex) {
 // Record a write at the current path: the constant `val` of scalar type
 // `ty` (INVALID: 0), or with `clear` the zeroing of the whole member.
 static void ginit_write(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val,
-                        bool clear) {
+                        string ptr_sym, bool clear) {
     if (gi->n == gi->cap) {
         size_t cap = gi->cap ? gi->cap * 2 : 16;
         GInitSlot *ns = arena_new_array(gi->e->arena, GInitSlot, cap);
@@ -7638,17 +7639,22 @@ static void ginit_write(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val,
     sl->depth = gi->depth;
     sl->ty = ty;
     sl->val = val;
+    sl->ptr_sym = ptr_sym;
     sl->clear = clear;
 }
 
 static void ginit_set(GInit *gi, MLIR_TypeHandle ty, MLIR_AttributeHandle val) {
-    ginit_write(gi, ty, val, false);
+    ginit_write(gi, ty, val, (string){0}, false);
+}
+
+static void ginit_set_sym(GInit *gi, MLIR_TypeHandle ty, string ptr_sym) {
+    ginit_write(gi, ty, MLIR_INVALID_HANDLE, ptr_sym, false);
 }
 
 // A designator re-initializes a member that may already be set
 // (`{.in = {1, 2}, .in = {3}}`): zero all of it.
 static void ginit_clear(GInit *gi) {
-    ginit_write(gi, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, true);
+    ginit_write(gi, MLIR_INVALID_HANDLE, MLIR_INVALID_HANDLE, (string){0}, true);
 }
 
 // Order writes by path (a member before what is inside it), then by
@@ -7725,16 +7731,26 @@ static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_Value
             nc++;
             continue;
         }
-        if (sl->val == MLIR_INVALID_HANDLE) continue;
+        if (sl->val == MLIR_INVALID_HANDLE && sl->ptr_sym.size == 0) continue;
         if (nc > 0 && cseq[nc - 1] > i) continue;
         if (r + 1 < n && ginit_same_path(sl, &gi->slots[ord[r + 1]])) continue;
         MLIR_ValueHandle c = MLIR_INVALID_HANDLE;
-        MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = sl->ty;
-        MLIR_ValueHandle *crs = &c;
-        MLIR_NamedAttr *cas = arena_new_array(e->arena, MLIR_NamedAttr, 1);
-        cas[0] = MLIR_Named(MLIR_KEY_VALUE, sl->val);
-        emit_op(e, OP_TYPE_LLVM_MLIR_CONSTANT,
-                crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
+        if (sl->ptr_sym.size > 0) {
+            MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = e->ptr;
+            MLIR_ValueHandle *crs = &c;
+            MLIR_NamedAttr *cas = arena_new_array(e->arena, MLIR_NamedAttr, 1);
+            cas[0] = MLIR_Named(MLIR_KEY_GLOBAL_NAME,
+                                MLIR_CreateAttributeSymbolRef(e->ctx, sl->ptr_sym));
+            emit_op(e, OP_TYPE_LLVM_MLIR_ADDRESSOF,
+                    crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
+        } else {
+            MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = sl->ty;
+            MLIR_ValueHandle *crs = &c;
+            MLIR_NamedAttr *cas = arena_new_array(e->arena, MLIR_NamedAttr, 1);
+            cas[0] = MLIR_Named(MLIR_KEY_VALUE, sl->val);
+            emit_op(e, OP_TYPE_LLVM_MLIR_CONSTANT,
+                    crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
+        }
         MLIR_ValueHandle rv = MLIR_INVALID_HANDLE;
         MLIR_TypeHandle *rts = arena_new_array(e->arena, MLIR_TypeHandle, 1); rts[0] = agg_ty;
         MLIR_ValueHandle *rs = &rv;
@@ -7766,6 +7782,33 @@ static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
     GConst c;
     bool ok = gconst_eval(e, ex, &c);
     if (ty == e->ptr) {
+        Expr *px = ex;
+        while (px && px->kind == EX_CAST) px = px->lhs;
+        if (px && px->kind == EX_STR) {
+            string ssym = intern_string(e, px->name);
+            ginit_set_sym(gi, ty, ssym);
+            return;
+        }
+        if (px && px->kind == EX_ADDR && px->lhs && px->lhs->kind == EX_VAR && e->program) {
+            for (size_t gi_i = 0; gi_i < e->program->globals.size; gi_i++) {
+                if (str_eq(e->program->globals.data[gi_i].name, px->lhs->name)) {
+                    ginit_set_sym(gi, ty, e->program->globals.data[gi_i].name);
+                    return;
+                }
+            }
+        }
+        if (px && px->kind == EX_VAR && e->program) {
+            for (size_t gi_i = 0; gi_i < e->program->globals.size; gi_i++) {
+                Global *gg = &e->program->globals.data[gi_i];
+                if (str_eq(gg->name, px->name) &&
+                    (gg->type.kind == TY_ARRAY_I32 || gg->type.kind == TY_ARRAY_F32 ||
+                     gg->type.kind == TY_ARRAY_STRUCT || gg->type.kind == TY_ARRAY_PTR_CHAR ||
+                     gg->type.kind == TY_ARRAY_PTR_STRUCT)) {
+                    ginit_set_sym(gi, ty, gg->name);
+                    return;
+                }
+            }
+        }
         if (!ok || c.is_float || c.i.v != 0)
             EMIT_ERR(e, "only a null pointer can initialize a pointer in a global aggregate");
         // After a designator, a null pointer may replace an earlier value.
@@ -8124,6 +8167,15 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                        g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_PTR_VOID ||
                        g->type.kind == TY_FNPTR || g->type.kind == TY_PTR_PTR) {
                 gty = e.ptr;
+            } else if (g->type.kind == TY_STRUCT) {
+                StructDef *sd = find_struct(&e, g->type.struct_name);
+                gty = sd ? find_struct_type(&e, sd) : e.i32;
+            } else if (g->type.kind == TY_ARRAY_I32 || g->type.kind == TY_ARRAY_F32 ||
+                       g->type.kind == TY_ARRAY_STRUCT || g->type.kind == TY_ARRAY_PTR_CHAR ||
+                       g->type.kind == TY_ARRAY_PTR_STRUCT) {
+                gty = array_mlir_type(&e, &g->type);
+            } else if (g->type.kind == TY_I64) {
+                gty = e.i64;
             } else if (g->type.kind == TY_I32) {
                 gty = int_mem_type(&e, &g->type);
             } else {

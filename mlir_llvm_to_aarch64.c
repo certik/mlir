@@ -2251,6 +2251,25 @@ typedef struct { uint32_t slot_off; uint32_t target_off; } PtrReloc;
 // return) become an internal data->data pointer reloc (emitted as an
 // `aarch64.data_ptr`). Absent values are zero-filled. Returns false on an
 // unsupported global.
+typedef struct { uint32_t slot_off; string target; } A64PendingReloc;
+typedef struct {
+    uint32_t base_off;
+    A64PendingReloc **pend;
+    size_t *pend_cap;
+    size_t *n_pend;
+} A64RelocCtx;
+
+static void a64_on_global_reloc(void *ud, unsigned rel_off, string target) {
+    A64RelocCtx *rc = (A64RelocCtx *)ud;
+    if (*rc->n_pend == *rc->pend_cap) {
+        *rc->pend_cap = *rc->pend_cap ? *rc->pend_cap * 2 : 8;
+        *rc->pend = (A64PendingReloc *)realloc(*rc->pend, *rc->pend_cap * sizeof(**rc->pend));
+    }
+    (*rc->pend)[*rc->n_pend].slot_off = rc->base_off + rel_off;
+    (*rc->pend)[*rc->n_pend].target = target;
+    (*rc->n_pend)++;
+}
+
 static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
                             GlobalMap *gm, uint8_t **blob_out,
                             uint32_t *blob_len_out,
@@ -2265,9 +2284,8 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
 
     // Pending pointer relocs hold the target global NAME (it may be a
     // forward reference), resolved to an offset after all globals are placed.
-    typedef struct { uint32_t slot_off; string target; } PendingReloc;
-    PendingReloc *pend = cap ? (PendingReloc *)calloc(cap, sizeof(PendingReloc))
-                             : NULL;
+    size_t pend_cap = cap ? cap : 8;
+    A64PendingReloc *pend = (A64PendingReloc *)calloc(pend_cap, sizeof(A64PendingReloc));
     size_t n_pend = 0;
 
     uint8_t *blob = NULL;
@@ -2324,45 +2342,45 @@ static bool collect_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
             } else {
                 free(blob); free(pend); return false;
             }
-        } else if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ctx, ta), 8,
-                                          blob + off, sz)) {
-            // Constant aggregate initializer (llvm.insertvalue chain).
-        } else if (MLIR_GetOpNumRegions(ctx, op) > 0 &&
-                   MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, op, 0)) > 0) {
-            // Region-init pointer global: scan for addressof @target + return.
-            MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, op, 0), 0);
-            size_t nb = MLIR_GetBlockNumOps(ctx, blk);
-            string target = (string){0};
-            bool only_trivial = true;
-            for (size_t bi = 0; bi < nb; bi++) {
-                MLIR_OpHandle bop = MLIR_GetBlockOp(ctx, blk, bi);
-                MLIR_OpType opn_ty = MLIR_GetOpType(ctx, bop);
-                if (opn_ty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
-                    MLIR_AttributeHandle ga =
-                        MLIR_GetOpAttr(ctx, bop, MLIR_KEY_GLOBAL_NAME);
-                    if (ga == MLIR_INVALID_HANDLE) { free(blob); free(pend); return false; }
-                    string ts = MLIR_GetAttributeAsString(ctx, ga);
-                    if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
-                    target = ts;
-                } else if (opn_ty != OP_TYPE_LLVM_MLIR_ZERO &&
-                           opn_ty != OP_TYPE_LLVM_MLIR_UNDEF &&
-                           opn_ty != OP_TYPE_LLVM_RETURN) {
-                    // Anything other than zero/undef/return/addressof means a
-                    // non-trivial initializer we can't lower here.
-                    only_trivial = false;
+        } else {
+            size_t save_pend = n_pend;
+            A64RelocCtx rc = { off, &pend, &pend_cap, &n_pend };
+            if (llvm_global_init_bytes_relocs(ctx, op, MLIR_GetAttributeTypeValue(ctx, ta), 8,
+                                              blob + off, sz, a64_on_global_reloc, &rc)) {
+                // Constant aggregate initializer (llvm.insertvalue chain, with optional ptr relocs).
+            } else {
+                n_pend = save_pend;
+                if (MLIR_GetOpNumRegions(ctx, op) > 0 &&
+                    MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, op, 0)) > 0) {
+                    // Region-init pointer global: scan for addressof @target + return.
+                    MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, op, 0), 0);
+                    size_t nb = MLIR_GetBlockNumOps(ctx, blk);
+                    string target = (string){0};
+                    bool only_trivial = true;
+                    for (size_t bi = 0; bi < nb; bi++) {
+                        MLIR_OpHandle bop = MLIR_GetBlockOp(ctx, blk, bi);
+                        MLIR_OpType opn_ty = MLIR_GetOpType(ctx, bop);
+                        if (opn_ty == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                            MLIR_AttributeHandle ga =
+                                MLIR_GetOpAttr(ctx, bop, MLIR_KEY_GLOBAL_NAME);
+                            if (ga == MLIR_INVALID_HANDLE) { free(blob); free(pend); return false; }
+                            string ts = MLIR_GetAttributeAsString(ctx, ga);
+                            if (ts.size && ts.str[0] == '@') { ts.str++; ts.size--; }
+                            target = ts;
+                        } else if (opn_ty != OP_TYPE_LLVM_MLIR_ZERO &&
+                                   opn_ty != OP_TYPE_LLVM_MLIR_UNDEF &&
+                                   opn_ty != OP_TYPE_LLVM_RETURN) {
+                            only_trivial = false;
+                        }
+                    }
+                    if (target.str) {
+                        if (sz < 8) { free(blob); free(pend); return false; }
+                        a64_on_global_reloc(&rc, 0, target);
+                    } else if (!only_trivial) {
+                        free(blob); free(pend); return false;
+                    }
                 }
             }
-            if (target.str) {
-                // Pointer global initialised to the address of another global.
-                if (sz < 8) { free(blob); free(pend); return false; }
-                pend[n_pend].slot_off = off;
-                pend[n_pend].target   = target;
-                n_pend++;
-            } else if (!only_trivial) {
-                // Unsupported non-zero aggregate/scalar initializer.
-                free(blob); free(pend); return false;
-            }
-            // else: zeroinitializer / undef — blob is already zero-filled.
         }
         blen = need;
 

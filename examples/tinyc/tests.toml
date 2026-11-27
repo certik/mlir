@@ -1818,3 +1818,9 @@ expected_stdout = "5 4 10\n"
 name = "elf_main_argc_argv"
 targets = ["elf"]
 expected_stdout = "argc=1\nargv0=ok\n"
+
+[[test]]
+name = "global_ptr_aggregate_init"
+targets = ["native", "wasm", "macho", "elf"]
+# Non-null pointer relocations in global struct and pointer-array initializers (#317).
+expected_stdout = "abc 42 7\nStatic Heap Stack 3\n5012 1 +122\nfirst 42 second 20 1\n"

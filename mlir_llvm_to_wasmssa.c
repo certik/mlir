@@ -53,6 +53,7 @@
 
 #include <base/arena.h>
 #include <base/string.h>
+#include <base/strbuf.h>
 
 // =============================================================================
 // Private working representation for this stage. `wasmssa_op_t` is a
@@ -2589,6 +2590,21 @@ static void emit_import_global(MLIR_Context *ctx, Arena *arena,
     (void)arena;
 }
 
+typedef struct {
+    Arena *arena;
+    strbuf sb;
+} WasmGlobalRelocCtx;
+
+static void wasm_on_global_reloc(void *ud, unsigned off, string target) {
+    WasmGlobalRelocCtx *rc = (WasmGlobalRelocCtx *)ud;
+    if (rc->sb.size > 0) strbuf_append(rc->arena, &rc->sb, str_lit(","));
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%u:", off);
+    if (n > 0) strbuf_append(rc->arena, &rc->sb, (string){ tmp, (size_t)n });
+    strbuf_append(rc->arena, &rc->sb, target);
+    strbuf_append(rc->arena, &rc->sb, str_lit(":0"));
+}
+
 // Lower one llvm.mlir.global op directly into a wasmssa.import_global op
 // appended to `body`. Returns false on failure (no op is appended).
 static bool lower_global(MLIR_Context *ctx, Arena *arena,
@@ -2646,14 +2662,18 @@ static bool lower_global(MLIR_Context *ctx, Arena *arena,
     }
 
     // Region-init globals with a constant initializer: an
-    // llvm.mlir.zero / undef + llvm.insertvalue chain of constants.
+    // llvm.mlir.zero / undef + llvm.insertvalue chain of constants / addressofs.
     if (MLIR_GetOpNumRegions(ctx, op) > 0 && ga != MLIR_INVALID_HANDLE && size > 0) {
         data = (uint8_t *)arena_alloc(arena, size);
         memset(data, 0, size);
-        if (llvm_global_init_bytes(ctx, op, MLIR_GetAttributeTypeValue(ctx, ga), 4,
-                                   data, size)) {
+        WasmGlobalRelocCtx rc;
+        rc.arena = arena;
+        rc.sb = strbuf_make();
+        if (llvm_global_init_bytes_relocs(ctx, op, MLIR_GetAttributeTypeValue(ctx, ga), 4,
+                                          data, size, wasm_on_global_reloc, &rc)) {
+            string rstr = strbuf_to_string(rc.sb);
             emit_import_global(ctx, arena, body, sym, size, align_pow,
-                               is_const, data, NULL, 0);
+                               is_const, data, rstr.size ? rstr.str : NULL, rstr.size);
             return true;
         }
     }
