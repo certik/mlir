@@ -1843,3 +1843,9 @@ name = "elf_setjmp_longjmp"
 targets = ["elf"]
 # __builtin_setjmp / __builtin_longjmp on x86_64/ELF (#337).
 expected_stdout = "first\ncaught 42\nzero-becomes 1\n"
+
+[[test]]
+name = "struct_array_of_struct_field"
+targets = ["native", "wasm", "macho", "elf"]
+# Arrays of structs as struct fields (#340).
+expected_stdout = "44 1071 1168 400\n"
