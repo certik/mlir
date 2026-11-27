@@ -4440,7 +4440,9 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 return r;
             }
             MLIR_ValueHandle b = emit_to_bool_i1(e, a);
-            r.val = emit_select(e, e->i32, b, emit_const_i32(e, 0), emit_const_i32(e, 1));
+            MLIR_ValueHandle zero = emit_const_i32(e, 0);
+            MLIR_ValueHandle one = emit_const_i32(e, 1);
+            r.val = emit_select(e, e->i32, b, zero, one);
             fact_put(e, r.val, FACT_RANGE, 1, true, 0);
             return r;
         }
