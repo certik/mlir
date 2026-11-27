@@ -1,3 +1,4 @@
+#include <stdlib.h>
 extern int printf(const char *fmt, ...);
 // Exercise pointer comparisons against null.
 

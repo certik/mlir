@@ -1,3 +1,4 @@
+#include <stdlib.h>
 extern int printf(const char *fmt, ...);
 // Build a singly-linked list 1 -> 2 -> 3, traverse to compute sum,
 // then free the nodes. Exercises pointer-typed struct fields, malloc,
