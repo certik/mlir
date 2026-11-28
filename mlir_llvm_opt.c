@@ -2126,8 +2126,9 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                 // Casts of integer constants: sext / zext / trunc / sitofp / uitofp
                 if (ot == OP_TYPE_LLVM_SEXT || ot == OP_TYPE_LLVM_ZEXT || ot == OP_TYPE_LLVM_TRUNC) {
                     int64_t c0 = 0; uint32_t sw = 0;
+                    MLIR_ValueHandle src = MLIR_GetOpOperand(ctx, op, 0);
                     if (rk == MLIR_TYPE_KIND_INTEGER &&
-                        cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, op, 0), &c0, &sw)) {
+                        cf_get_int_const(ctx, src, &c0, &sw)) {
                         uint32_t rw = MLIR_GetTypeWidth(ctx, rty);
                         int64_t rv = (ot == OP_TYPE_LLVM_SEXT) ? cf_mask(cf_sext(c0, sw), rw)
                                                                : cf_mask(c0, rw);
@@ -2136,6 +2137,26 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                         MLIR_DetachOp(ctx, op);
                         changed = true;
                         continue;
+                    }
+                    // sext/zext (bool -> iN) -> zext (i1 -> iM)
+                    if ((ot == OP_TYPE_LLVM_SEXT || ot == OP_TYPE_LLVM_ZEXT) &&
+                        rk == MLIR_TYPE_KIND_INTEGER) {
+                        MLIR_ValueHandle b1 = cf_unwrap_bool_i1(ctx, src);
+                        if (b1 != MLIR_INVALID_HANDLE) {
+                            MLIR_OpSpec sp;
+                            memset(&sp, 0, sizeof(sp));
+                            sp.type = OP_TYPE_LLVM_ZEXT;
+                            sp.operands = &b1;
+                            sp.n_operands = 1;
+                            sp.result_types = &rty;
+                            sp.n_results = 1;
+                            MLIR_OpHandle nz = MLIR_CreateOpFromSpec(ctx, &sp);
+                            MLIR_InsertBlockOpAtIndex(ctx, bk, nz, i);
+                            MLIR_ReplaceAllUsesOfValue(ctx, res, MLIR_GetOpResult(ctx, nz, 0));
+                            MLIR_DetachOp(ctx, op);
+                            changed = true;
+                            continue;
+                        }
                     }
                     i++; continue;
                 }
