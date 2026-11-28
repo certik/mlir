@@ -1500,10 +1500,41 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                 return;
             }
-            // Inline memcpy/base_memcpy -> rep movsb and memset/base_memset -> rep stosb at -O2.
-            // Safe w.r.t. regalloc because llvm.call already clobbers all caller-saved regs.
+            // Inline memcpy/base_memcpy and memset/base_memset at -O2.
+            // Small constant sizes (<= 64 bytes) emit unrolled 8/4/2/1-byte moves
+            // (avoiding the ~25-cycle `rep movsb`/`rep stosb` microcode startup);
+            // larger or dynamic sizes use `rep movsb` / `rep stosb`.
             if (g_x64_opt_level >= 2 && !F->wasm_lifted && no == 3) {
                 if (str_eqz(callee, "memcpy") || str_eqz(callee, "base_memcpy")) {
+                    int64_t n_imm = -1;
+                    if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 2)), &n_imm) &&
+                        n_imm >= 0 && n_imm <= 64) {
+                        emit_parallel_arg_moves(F, op, 0, 2);    // RDI=dst, RSI=src
+                        int32_t off = 0;
+                        int64_t rem = n_imm;
+                        while (rem >= 8) {
+                            load_mem_disp(F, R11, RSI, 8, false, off);
+                            store_mem_disp(F, RDI, R11, 8, off);
+                            off += 8; rem -= 8;
+                        }
+                        if (rem >= 4) {
+                            load_mem_disp(F, R11, RSI, 4, false, off);
+                            store_mem_disp(F, RDI, R11, 4, off);
+                            off += 4; rem -= 4;
+                        }
+                        if (rem >= 2) {
+                            load_mem_disp(F, R11, RSI, 2, false, off);
+                            store_mem_disp(F, RDI, R11, 2, off);
+                            off += 2; rem -= 2;
+                        }
+                        if (rem >= 1) {
+                            load_mem_disp(F, R11, RSI, 1, false, off);
+                            store_mem_disp(F, RDI, R11, 1, off);
+                        }
+                        if (MLIR_GetOpNumResults(ctx, op) == 1)
+                            store_val(F, MLIR_GetOpResult(ctx, op, 0), RDI);
+                        return;
+                    }
                     emit_parallel_arg_moves(F, op, 0, 3);    // RDI=dst, RSI=src, RDX=n
                     mov_rr(F, RAX, RDI, 1);                  // return original dst
                     mov_rr(F, RCX, RDX, 1);                  // count = n
@@ -1513,6 +1544,23 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     return;
                 }
                 if (str_eqz(callee, "memset") || str_eqz(callee, "base_memset")) {
+                    int64_t c_imm = -1, n_imm = -1;
+                    if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 1)), &c_imm) &&
+                        c_imm == 0 &&
+                        is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 2)), &n_imm) &&
+                        n_imm >= 0 && n_imm <= 64) {
+                        emit_parallel_arg_moves(F, op, 0, 1);    // RDI=dst
+                        if (n_imm > 0) mov_ri(F, R11, 0, 0);
+                        int32_t off = 0;
+                        int64_t rem = n_imm;
+                        while (rem >= 8) { store_mem_disp(F, RDI, R11, 8, off); off += 8; rem -= 8; }
+                        if (rem >= 4)    { store_mem_disp(F, RDI, R11, 4, off); off += 4; rem -= 4; }
+                        if (rem >= 2)    { store_mem_disp(F, RDI, R11, 2, off); off += 2; rem -= 2; }
+                        if (rem >= 1)    { store_mem_disp(F, RDI, R11, 1, off); }
+                        if (MLIR_GetOpNumResults(ctx, op) == 1)
+                            store_val(F, MLIR_GetOpResult(ctx, op, 0), RDI);
+                        return;
+                    }
                     emit_parallel_arg_moves(F, op, 0, 3);    // RDI=dst, RSI=c, RDX=n
                     mov_rr(F, R11, RDI, 1);                  // save original dst
                     mov_rr(F, RAX, RSI, 0);                  // fill byte in AL

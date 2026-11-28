@@ -666,7 +666,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     // --- 1. Linearise + number values + record def_blk / block_vrange / calls. ---
     size_t nv_alloc = nv_max ? nv_max : 1;
     size_t main_need =
-        n_blocks * (sizeof(uint32_t) * 4 + 8) +
+        n_blocks * (sizeof(uint32_t) * 5 + 8) +
         (n_blocks + 1) * (sizeof(uint32_t) * 3 + sizeof(int64_t) + 8) +
         nv_alloc * (sizeof(MLIR_ValueHandle) + sizeof(uint32_t) * 12 +
                     sizeof(uint64_t) + sizeof(uint8_t) * 2 + sizeof(int32_t) + 8) +
@@ -810,6 +810,11 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         memset(loop_depth, 0, n_blocks * sizeof(uint32_t));
         int64_t *delta = (int64_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(int64_t));
         memset(delta, 0, (n_blocks + 1) * sizeof(int64_t));
+        // Track the furthest backedge source per loop header so a switch-dispatch
+        // loop with 80+ cases jumping back to the same header counts as depth 1
+        // (not depth 80, which previously overflowed uint64_t weights!).
+        int32_t *hdr_max_b = (int32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(int32_t));
+        memset(hdr_max_b, 0xff, n_blocks * sizeof(int32_t));
         size_t sc = 0;
         for (size_t b = 0; b < n_blocks; b++) {
             succ_off[b] = (uint32_t)sc;
@@ -834,20 +839,26 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     succ_idx[sc++] = ti;
                     if (ti <= (uint32_t)b) {
                         has_backedge = true;
-                        delta[ti] += 1; delta[b + 1] -= 1;
+                        if ((int32_t)b > hdr_max_b[ti]) hdr_max_b[ti] = (int32_t)b;
                     }
                 }
             }
         }
         succ_off[n_blocks] = (uint32_t)sc;
         if (has_backedge) {
+            for (size_t ti = 0; ti < n_blocks; ti++) {
+                if (hdr_max_b[ti] >= 0) {
+                    delta[ti] += 1;
+                    delta[(size_t)hdr_max_b[ti] + 1] -= 1;
+                }
+            }
             int64_t acc = 0;
             for (size_t b = 0; b < n_blocks; b++) {
                 acc += delta[b]; loop_depth[b] = acc < 0 ? 0 : (uint32_t)acc;
             }
         }
     }
-    #define A64_USE_WEIGHT_AT(d) (1ull << (((d) * 3u) < 60u ? ((d) * 3u) : 60u))
+    #define A64_USE_WEIGHT_AT(d) (1ull << (((d) * 3u) < 30u ? ((d) * 3u) : 30u))
 
     // --- 2. Single combined operand pass: first_pos / last_use / weight / nuse
     //        AND identify cross-block ("global") values for sparse liveness. ---
