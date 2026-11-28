@@ -305,8 +305,9 @@ typedef struct {
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area
     int           n_cs;      // # of callee-saved regs to save/restore
     uint8_t       cs_reg[8]; // those registers, in save order
-    bool          omit_fp;   // true when frame pointer (rbp) is omitted
-    bool          fp_pad;    // true when omit_fp needs 8-byte rsp alignment pad for calls
+    bool          omit_fp;       // true when frame pointer (rbp) is omitted (0-slot frame)
+    bool          fp_pad;        // true when omit_fp needs 8-byte rsp alignment pad for calls
+    bool          use_rsp_frame; // true when frame slots use [rsp + (frame - off)], freeing RBP as 6th callee-saved reg
     // intra-function branch fixups (used by x64_encode_block)
     BrFix        *fix; size_t n_fix, c_fix;
     X64JTab      *jtabs; size_t n_jtabs, c_jtabs;
@@ -490,57 +491,36 @@ static void imul_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
     eb(F, 0x0F); eb(F, 0xAF);
     modrm(F, 3, dst, src);
 }
-// load reg, [rbp - off]
+// Emit ModRM (+ SIB/disp) for a frame slot: [rsp + frame - off] if use_rsp_frame, else [rbp - off].
+static inline void emit_frame_modrm(FnCtx *F, uint8_t reg, int32_t off) {
+    if (F->use_rsp_frame) {
+        int32_t d = (int32_t)F->frame - off;
+        if (d == 0)                     { modrm(F, 0, reg, RSP); eb(F, 0x24); }
+        else if (d >= -128 && d <= 127) { modrm(F, 1, reg, RSP); eb(F, 0x24); eb(F, (uint8_t)(int8_t)d); }
+        else                            { modrm(F, 2, reg, RSP); eb(F, 0x24); e32(F, (uint32_t)d); }
+    } else {
+        int32_t d = -off;
+        if (d >= -128 && d <= 127) { modrm(F, 1, reg, RBP); eb(F, (uint8_t)(int8_t)d); }
+        else                       { modrm(F, 2, reg, RBP); e32(F, (uint32_t)d); }
+    }
+}
+// load reg, [rbp - off] (or [rsp + frame - off])
 static inline void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
     if (F->x64_blk) {
         x64_emit1(F, OP_TYPE_X64_LOAD_RBP,
                   (int64_t)reg | ((int64_t)w << 8) | ((int64_t)(uint32_t)off << 32));
         return;
     }
-    Buf *b = &F->f->code;
-    if (b->len + 7 > b->cap) buf_grow(b, 7);
-    uint8_t *p = b->data + b->len;
-    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
-    if (rv != 0x40 || w) *p++ = rv;
-    *p++ = 0x8B;
-    int32_t d = -off;
-    if (d >= -128 && d <= 127) {
-        *p++ = (uint8_t)(0x40 | ((reg & 7) << 3) | RBP);
-        *p++ = (uint8_t)(int8_t)d;
-    } else {
-        *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
-        uint32_t u = (uint32_t)d;
-        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
-        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
-        p += 4;
-    }
-    b->len = (size_t)(p - b->data);
+    rex(F, w, reg, 0, 0); eb(F, 0x8B); emit_frame_modrm(F, reg, off);
 }
-// store [rbp - off], reg
+// store [rbp - off], reg (or [rsp + frame - off])
 static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
     if (F->x64_blk) {
         x64_emit1(F, OP_TYPE_X64_STORE_RBP,
                   (int64_t)reg | ((int64_t)w << 8) | ((int64_t)(uint32_t)off << 32));
         return;
     }
-    Buf *b = &F->f->code;
-    if (b->len + 7 > b->cap) buf_grow(b, 7);
-    uint8_t *p = b->data + b->len;
-    uint8_t rv = (uint8_t)(0x40 | (w << 3) | ((reg >= 8) << 2));
-    if (rv != 0x40 || w) *p++ = rv;
-    *p++ = 0x89;
-    int32_t d = -off;
-    if (d >= -128 && d <= 127) {
-        *p++ = (uint8_t)(0x40 | ((reg & 7) << 3) | RBP);
-        *p++ = (uint8_t)(int8_t)d;
-    } else {
-        *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
-        uint32_t u = (uint32_t)d;
-        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
-        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
-        p += 4;
-    }
-    b->len = (size_t)(p - b->data);
+    rex(F, w, reg, 0, 0); eb(F, 0x89); emit_frame_modrm(F, reg, off);
 }
 static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
     if (F->x64_blk) {
@@ -548,23 +528,7 @@ static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
                   (int64_t)reg | ((int64_t)(uint32_t)off << 32));
         return;
     }
-    Buf *b = &F->f->code;
-    if (b->len + 7 > b->cap) buf_grow(b, 7);
-    uint8_t *p = b->data + b->len;
-    *p++ = (uint8_t)(0x48 | ((reg >= 8) << 2));
-    *p++ = 0x8D;
-    int32_t d = -off;
-    if (d >= -128 && d <= 127) {
-        *p++ = (uint8_t)(0x40 | ((reg & 7) << 3) | RBP);
-        *p++ = (uint8_t)(int8_t)d;
-    } else {
-        *p++ = (uint8_t)(0x80 | ((reg & 7) << 3) | RBP);
-        uint32_t u = (uint32_t)d;
-        p[0] = (uint8_t)(u & 0xff); p[1] = (uint8_t)((u >> 8) & 0xff);
-        p[2] = (uint8_t)((u >> 16) & 0xff); p[3] = (uint8_t)((u >> 24) & 0xff);
-        p += 4;
-    }
-    b->len = (size_t)(p - b->data);
+    rex(F, 1, reg, 0, 0); eb(F, 0x8D); emit_frame_modrm(F, reg, off);
 }
 static void load_rbp_sized(FnCtx *F, uint8_t dst, int32_t off, int bytes) {
     if (F->x64_blk) {
@@ -576,9 +540,7 @@ static void load_rbp_sized(FnCtx *F, uint8_t dst, int32_t off, int bytes) {
     if (bytes == 4) { load_rbp(F, dst, off, 0); return; }
     rex(F, 1, dst, 0, 0);
     eb(F, 0x0F); eb(F, bytes == 2 ? 0xB7 : 0xB6);
-    int32_t d = -off;
-    if (d >= -128 && d <= 127) { modrm(F, 1, dst, RBP); eb(F, (uint8_t)(int8_t)d); }
-    else                       { modrm(F, 2, dst, RBP); e32(F, (uint32_t)d); }
+    emit_frame_modrm(F, dst, off);
 }
 static void store_rbp_sized(FnCtx *F, int32_t off, uint8_t src, int bytes) {
     if (F->x64_blk) {
@@ -593,9 +555,7 @@ static void store_rbp_sized(FnCtx *F, int32_t off, uint8_t src, int bytes) {
         if (src >= 4) eb(F, (uint8_t)(0x40 | ((src >= 8) << 2)));
         eb(F, 0x88);
     }
-    int32_t d = -off;
-    if (d >= -128 && d <= 127) { modrm(F, 1, src, RBP); eb(F, (uint8_t)(int8_t)d); }
-    else                       { modrm(F, 2, src, RBP); e32(F, (uint32_t)d); }
+    emit_frame_modrm(F, src, off);
 }
 // Emit `lea reg, [rip+disp32]` with disp32 left at 0; return offset of disp32 field.
 static uint32_t lea_rip_emit(FnCtx *F, uint8_t reg) {
