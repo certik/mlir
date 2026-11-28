@@ -2246,6 +2246,9 @@ static bool x64_op_regs(MLIR_Context *ctx, MLIR_OpHandle op,
     }
 }
 
+static const uint16_t *g_x64_lbl_live_in = NULL;
+static size_t g_x64_n_lbl = 0;
+
 static bool x64_reg_dead_after(MLIR_Context *ctx, MLIR_BlockHandle blk,
                                size_t start, size_t n_ops, uint8_t reg) {
     uint16_t bit = (uint16_t)(1u << reg);
@@ -2256,16 +2259,181 @@ static bool x64_reg_dead_after(MLIR_Context *ctx, MLIR_BlockHandle blk,
         MLIR_OpType ty = MLIR_GetOpType(ctx, op);
         if (ty == OP_TYPE_X64_NOP) continue;
         seen++;
-        // Scratch regs (RAX/RCX/RDX/R11) are never live across block boundaries
-        // (JMP/JCC/LABEL), though RET reads RAX and CALL reads RCX/RDX/R11.
+        // Scratch regs (RAX/RCX/R11) are never live across block boundaries
+        // (JMP/JCC/LABEL), though RET reads RAX and CALL reads RCX/R11.
         if (is_scratch && (ty == OP_TYPE_X64_JMP || ty == OP_TYPE_X64_JCC || ty == OP_TYPE_X64_LABEL))
             return true;
+        if (g_x64_lbl_live_in) {
+            if (ty == OP_TYPE_X64_JMP) {
+                uint32_t lbl = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+                return (lbl < g_x64_n_lbl) ? ((g_x64_lbl_live_in[lbl] & bit) == 0) : false;
+            }
+            if (ty == OP_TYPE_X64_JCC) {
+                uint32_t lbl = (uint32_t)((uint64_t)MLIR_GetOpInlineI64(ctx, op) >> 32);
+                if (lbl >= g_x64_n_lbl || (g_x64_lbl_live_in[lbl] & bit)) return false;
+                continue; // dead on taken branch; keep scanning fallthrough
+            }
+            if (ty == OP_TYPE_X64_LABEL) {
+                uint32_t lbl = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+                return (lbl < g_x64_n_lbl) ? ((g_x64_lbl_live_in[lbl] & bit) == 0) : false;
+            }
+            if (ty == OP_TYPE_X64_RET) {
+                return reg != RAX && reg != RSP;
+            }
+        }
         uint16_t r = 0, w = 0;
         if (!x64_op_regs(ctx, op, &r, &w)) return false;
         if (r & bit) return false;
         if (w & bit) return true;
     }
     return false;
+}
+
+// Compute conservative 16-bit GPR liveness at every OP_TYPE_X64_LABEL in `blk`.
+static void x64_compute_lbl_liveness(MLIR_Context *ctx, MLIR_BlockHandle blk, size_t n_ops,
+                                     uint16_t **out_lbl_in, size_t *out_n_lbl) {
+    *out_lbl_in = NULL; *out_n_lbl = 0;
+    size_t n_lbl = 0;
+    for (size_t i = 0; i < n_ops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+        if (MLIR_GetOpType(ctx, op) == OP_TYPE_X64_LABEL) {
+            uint32_t l = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+            if ((size_t)l + 1 > n_lbl) n_lbl = (size_t)l + 1;
+        }
+    }
+    if (n_lbl == 0 || n_lbl > 4096) return;
+
+    // Partition ops into basic blocks: a new block starts at 0, at any LABEL,
+    // or right after JMP/JCC/RET/JTAB_DISPATCH.
+    size_t *b_start = (size_t *)malloc((n_ops + 1) * sizeof(size_t));
+    size_t *b_end   = (size_t *)malloc((n_ops + 1) * sizeof(size_t));
+    int32_t *lbl_to_b = (int32_t *)malloc(n_lbl * sizeof(int32_t));
+    for (size_t l = 0; l < n_lbl; l++) lbl_to_b[l] = -1;
+    size_t nb = 0;
+    size_t cur_s = 0;
+    for (size_t i = 0; i < n_ops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+        MLIR_OpType ty = MLIR_GetOpType(ctx, op);
+        if (ty == OP_TYPE_X64_LABEL) {
+            if (i > cur_s) { b_start[nb] = cur_s; b_end[nb] = i; nb++; cur_s = i; }
+            uint32_t l = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+            lbl_to_b[l] = (int32_t)nb;
+        } else if (ty == OP_TYPE_X64_JMP || ty == OP_TYPE_X64_JCC ||
+                   ty == OP_TYPE_X64_RET || ty == OP_TYPE_X64_JTAB_DISPATCH) {
+            b_start[nb] = cur_s; b_end[nb] = i + 1; nb++; cur_s = i + 1;
+        }
+    }
+    if (cur_s < n_ops) { b_start[nb] = cur_s; b_end[nb] = n_ops; nb++; }
+    if (nb == 0) { free(b_start); free(b_end); free(lbl_to_b); return; }
+
+    uint16_t *use = (uint16_t *)calloc(nb, sizeof(uint16_t));
+    uint16_t *def = (uint16_t *)calloc(nb, sizeof(uint16_t));
+    int32_t *s0 = (int32_t *)malloc(nb * sizeof(int32_t));
+    int32_t *s1 = (int32_t *)malloc(nb * sizeof(int32_t));
+    uint8_t *is_jtab = (uint8_t *)calloc(nb, 1);
+    const uint16_t call_reads = (uint16_t)((1u<<RDI)|(1u<<RSI)|(1u<<RDX)|(1u<<RCX)|(1u<<R8)|(1u<<R9)|(1u<<RAX));
+    const uint16_t call_writes = (uint16_t)((1u<<RAX)|(1u<<RCX)|(1u<<RDX)|(1u<<RSI)|(1u<<RDI)|(1u<<R8)|(1u<<R9)|(1u<<R10)|(1u<<R11));
+
+    for (size_t b = 0; b < nb; b++) {
+        s0[b] = -1; s1[b] = -1;
+        uint16_t u = 0, d = 0;
+        for (size_t i = b_start[b]; i < b_end[b]; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+            MLIR_OpType ty = MLIR_GetOpType(ctx, op);
+            if (ty == OP_TYPE_X64_NOP || ty == OP_TYPE_X64_LABEL) continue;
+            if (ty == OP_TYPE_X64_JMP) {
+                uint32_t l = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+                if (l < n_lbl) s0[b] = lbl_to_b[l];
+                break;
+            }
+            if (ty == OP_TYPE_X64_JCC) {
+                uint32_t l = (uint32_t)((uint64_t)MLIR_GetOpInlineI64(ctx, op) >> 32);
+                if (l < n_lbl) s0[b] = lbl_to_b[l];
+                if (b + 1 < nb) s1[b] = (int32_t)(b + 1);
+                break;
+            }
+            if (ty == OP_TYPE_X64_RET) {
+                u |= (uint16_t)((1u << RAX) & ~d);
+                break;
+            }
+            if (ty == OP_TYPE_X64_JTAB_DISPATCH) {
+                u |= (uint16_t)((1u << RAX) & ~d);
+                is_jtab[b] = 1;
+                break;
+            }
+            if (ty == OP_TYPE_X64_CALL_SYM) {
+                u |= (uint16_t)(call_reads & ~d);
+                d |= call_writes;
+                continue;
+            }
+            if (ty == OP_TYPE_X64_CALL_REG) {
+                uint8_t cr = (uint8_t)(MLIR_GetOpInlineI64(ctx, op) & 15);
+                u |= (uint16_t)((call_reads | (1u << cr)) & ~d);
+                d |= call_writes;
+                continue;
+            }
+            if (ty == OP_TYPE_X64_POP_R) {
+                uint8_t pr = (uint8_t)(MLIR_GetOpInlineI64(ctx, op) & 15);
+                u |= (uint16_t)((1u << RSP) & ~d);
+                d |= (uint16_t)((1u << pr) | (1u << RSP));
+                continue;
+            }
+            if (ty == OP_TYPE_X64_PUSH_R) {
+                uint8_t pr = (uint8_t)(MLIR_GetOpInlineI64(ctx, op) & 15);
+                u |= (uint16_t)(((1u << pr) | (1u << RSP)) & ~d);
+                d |= (uint16_t)(1u << RSP);
+                continue;
+            }
+            if (ty == OP_TYPE_X64_SUB_RSP || ty == OP_TYPE_X64_ADD_RSP) {
+                u |= (uint16_t)((1u << RSP) & ~d);
+                d |= (uint16_t)(1u << RSP);
+                continue;
+            }
+            uint16_t r = 0, w = 0;
+            if (x64_op_regs(ctx, op, &r, &w)) {
+                u |= (uint16_t)(r & ~d);
+                d |= w;
+            } else {
+                // Unknown op (e.g. syscall, rep stosb, pop): conservatively reads all undef'd regs.
+                u |= (uint16_t)(~d);
+            }
+        }
+        // Fallthrough if block did not end in a terminator.
+        MLIR_OpType last_ty = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, b_end[b] - 1));
+        if (last_ty != OP_TYPE_X64_JMP && last_ty != OP_TYPE_X64_JCC &&
+            last_ty != OP_TYPE_X64_RET && last_ty != OP_TYPE_X64_JTAB_DISPATCH &&
+            b + 1 < nb) {
+            s0[b] = (int32_t)(b + 1);
+        }
+        use[b] = u; def[b] = d;
+    }
+
+    uint16_t *live_in = (uint16_t *)calloc(nb, sizeof(uint16_t));
+    bool chg = true;
+    for (int iter = 0; iter < 64 && chg; iter++) {
+        chg = false;
+        uint16_t all_lbl_in = 0;
+        for (size_t l = 0; l < n_lbl; l++)
+            if (lbl_to_b[l] >= 0) all_lbl_in |= live_in[lbl_to_b[l]];
+        for (size_t b = nb; b-- > 0; ) {
+            uint16_t out = 0;
+            if (is_jtab[b]) out = all_lbl_in;
+            else {
+                if (s0[b] >= 0) out |= live_in[s0[b]];
+                if (s1[b] >= 0) out |= live_in[s1[b]];
+            }
+            uint16_t in = (uint16_t)(use[b] | (out & ~def[b]));
+            if (in != live_in[b]) { live_in[b] = in; chg = true; }
+        }
+    }
+
+    uint16_t *lbl_in = (uint16_t *)malloc(n_lbl * sizeof(uint16_t));
+    for (size_t l = 0; l < n_lbl; l++)
+        lbl_in[l] = (lbl_to_b[l] >= 0) ? live_in[lbl_to_b[l]] : 0xFFFFu;
+
+    free(live_in); free(is_jtab); free(s1); free(s0); free(def); free(use);
+    free(lbl_to_b); free(b_end); free(b_start);
+    *out_lbl_in = lbl_in; *out_n_lbl = n_lbl;
 }
 
 static size_t x64_next_live(MLIR_Context *ctx, MLIR_BlockHandle blk, size_t start, size_t n_ops) {
@@ -2279,6 +2447,11 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
     if (n_ops < 2) return;
 
     for (int pass = 0; pass < 3; pass++) {
+        uint16_t *lbl_in = NULL;
+        size_t n_lbl = 0;
+        x64_compute_lbl_liveness(ctx, blk, n_ops, &lbl_in, &n_lbl);
+        g_x64_lbl_live_in = lbl_in;
+        g_x64_n_lbl = n_lbl;
         bool changed = false;
         for (size_t i = 0; i < n_ops; i++) {
             MLIR_OpHandle op0 = MLIR_GetBlockOp(ctx, blk, i);
@@ -2877,6 +3050,46 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                         clob |= w;
                     }
                 }
+                // 5b. Symmetric: forward index copy into SIB load/store/ALU
+                //     (e.g. mov rcx, r12 ; movb $1, [r10 + rcx*1] -> movb $1, [r10 + r12*1])
+                v0 = (uint64_t)MLIR_GetOpInlineI64(ctx, op0);
+                base = base_in_hi ? (uint8_t)((v0 >> 4) & 15) : (uint8_t)(v0 & 15);
+                uint8_t idx = base_in_hi ? (uint8_t)((v0 >> 8) & 15) : (uint8_t)((v0 >> 4) & 15);
+                bool clobbers_idx = (t0 == OP_TYPE_X64_LOAD_MEM_SIB && (uint8_t)(v0 & 15) == idx) ||
+                                    (t0 == OP_TYPE_X64_ALU_RM_SIB && (uint8_t)(v0 & 15) == idx &&
+                                     (uint8_t)((v0 >> 20) & 0xff) != 0x39 && (uint8_t)((v0 >> 20) & 0xff) != 0x3B);
+                bool idx_is_val = (t0 == OP_TYPE_X64_STORE_MEM_SIB && (uint8_t)((v0 >> 8) & 15) == idx) ||
+                                  (t0 == OP_TYPE_X64_ALU_RM_SIB && (uint8_t)(v0 & 15) == idx);
+                bool idx_dead = clobbers_idx || x64_reg_dead_after(ctx, blk, i + 1, n_ops, idx);
+                if (idx_dead && !idx_is_val && idx != base) {
+                    uint16_t clob = 0;
+                    int steps = 0;
+                    for (size_t p = i; p > 0 && steps < 4; ) {
+                        p--;
+                        MLIR_OpHandle opp = MLIR_GetBlockOp(ctx, blk, p);
+                        MLIR_OpType tp = MLIR_GetOpType(ctx, opp);
+                        if (tp == OP_TYPE_X64_NOP) continue;
+                        steps++;
+                        if (tp == OP_TYPE_X64_MOV_RR) {
+                            uint64_t vp = (uint64_t)MLIR_GetOpInlineI64(ctx, opp);
+                            uint8_t dp = (uint8_t)(vp & 15), sp = (uint8_t)((vp >> 4) & 15);
+                            int wp = (int)((vp >> 8) & 1);
+                            if (dp == idx && wp == 1 && sp != RSP && !(clob & (1u << sp))) {
+                                MLIR_RewriteVoidInlineI64(ctx, opp, OP_TYPE_X64_NOP, 0);
+                                uint64_t nv = base_in_hi
+                                    ? ((v0 & ~(uint64_t)(15u << 8)) | ((uint64_t)sp << 8))
+                                    : ((v0 & ~(uint64_t)(15u << 4)) | ((uint64_t)sp << 4));
+                                MLIR_RewriteVoidInlineI64(ctx, op0, t0, (int64_t)nv);
+                                changed = true;
+                                break;
+                            }
+                        }
+                        uint16_t r = 0, w = 0;
+                        if (!x64_op_regs(ctx, opp, &r, &w)) break;
+                        if ((r | w) & (1u << idx)) break;
+                        clob |= w;
+                    }
+                }
             }
 
             // 6. Scratch result forwarding into MOV_RR:
@@ -3190,6 +3403,9 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                 }
             }
         }
+        g_x64_lbl_live_in = NULL;
+        g_x64_n_lbl = 0;
+        free(lbl_in);
         if (!changed) break;
     }
 }
