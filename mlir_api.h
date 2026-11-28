@@ -402,6 +402,7 @@ MLIR_OpHandle MLIR_BuildVoid2Attr(MLIR_Builder *b, MLIR_OpType t,
 MLIR_OpHandle MLIR_BuildVoidInlineI64(MLIR_Builder *b, MLIR_OpType t, int64_t val);
 bool MLIR_OpHasInlineI64(MLIR_Context *ctx, MLIR_OpHandle op);
 int64_t MLIR_GetOpInlineI64(MLIR_Context *ctx, MLIR_OpHandle op);
+void MLIR_RewriteVoidInlineI64(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType t, int64_t val);
 void MLIR_ReserveBlockOps(MLIR_Context *ctx, MLIR_BlockHandle block, size_t cap);
 void MLIR_ReserveOps(MLIR_Context *ctx, size_t extra_ops);
 uint32_t MLIR_GetOpCheckpoint(MLIR_Context *ctx);
