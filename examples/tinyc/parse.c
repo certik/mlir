@@ -1300,11 +1300,8 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
                       ty.kind == TY_PTR_CHAR || ty.kind == TY_PTR_I32 ||
                       ty.kind == TY_PTR_VOID || ty.kind == TY_PTR_PTR ||
                       ty.kind == TY_PTR_STRUCT || ty.kind == TY_FNPTR);
-    if (!is_scalar) {
-        // Leave as a regular local. Non-scalar statics in tinyc's own
-        // source are all const-initialized read-only tables; on every
-        // call the local re-initializes to the same data, which is
-        // observationally identical to a true static for these uses.
+    bool is_struct = (ty.kind == TY_STRUCT);
+    if (!is_scalar && !is_struct) {
         return;
     }
     Global g = (Global){0};
@@ -1315,7 +1312,12 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
     g.type = ty;
     g.line = line;
     g.is_static = true;
-    if (ds->expr) {
+    if (is_struct) {
+        if (ds->expr) {
+            g.has_init = true;
+            g.init_expr = ds->expr;
+        }
+    } else if (ds->expr) {
         Expr *e = ds->expr;
         // Unwrap `(T)0` / `(T*)0` / `(void*)0` casts written by NULL-like
         // macros around an integer-zero literal so the result is treated
@@ -2363,13 +2365,22 @@ static bool parse_sig_type(P *p, Type *out) {
                     out->kind = TY_PTR_I32;
                     out->ptr_is_i64 = true;
                 }
+                else if (out->kind == TY_F32) {
+                    out->kind = TY_PTR_I32;
+                    out->ptr_is_f32 = true;
+                }
+                else if (out->kind == TY_F64) {
+                    out->kind = TY_PTR_I32;
+                    out->ptr_is_f64 = true;
+                }
                 else if (out->kind == TY_STRUCT) out->kind = TY_PTR_STRUCT;
-                else if (out->kind == TY_FNPTR) {
-                    // `BinOp *` where BinOp is a typedef'd function pointer.
-                    // Wrap into TY_PTR_PTR(pointee=TY_FNPTR copy).
+                else if (out->kind == TY_FNPTR || out->kind == TY_PTR_STRUCT ||
+                         out->kind == TY_PTR_I32 || out->kind == TY_PTR_CHAR ||
+                         out->kind == TY_PTR_VOID || out->kind == TY_PTR_PTR) {
+                    // Pointer-to-typedef'd pointer or function pointer (`OpH *`,
+                    // `BinOp *`, `Str *`, ...).
                     wrap_ptr_to_ptr(p, out);
                 }
-                // else: ignore (e.g. typedef'd pointer + extra '*' not supported)
                 skip_const(p);
                 while (accept(p, TC_TK_STAR) &&
                     (out->kind == TY_PTR_I32 || out->kind == TY_PTR_STRUCT ||
@@ -2777,8 +2788,12 @@ static StructDef *parse_struct_def(P *p) {
             }
         }
         // Inline function-pointer field: `void (*progress)(const char *);`
+        // Save the plain base type before fnptr suffix so comma-separated
+        // declarators like `int (*fn)(int), x;` give `x` the plain type `int`.
+        Type plain_ft = ft;
         string fnptr_field_name = (string){0};
-        if (try_parse_fnptr_suffix(p, &ft, &fnptr_field_name)) {
+        bool first_is_fnptr = try_parse_fnptr_suffix(p, &ft, &fnptr_field_name);
+        if (first_is_fnptr) {
             (void)is_ptr;
         } else if (ft.kind == TY_VOID) {
             perror_at(p, cur(p).line,
@@ -2793,19 +2808,26 @@ static StructDef *parse_struct_def(P *p) {
         // (`int *a, b;`, `struct S *a, **b;`), nor a pointer level the
         // base-type code does not (`int ***p;`): they are rejected rather
         // than given the wrong type.
-        Type base_ft = ft;
+        Type first_ft = ft;
+        Type base_ft = first_is_fnptr ? plain_ft : ft;
         size_t base_stars = 0;
-        while (base_stars < p->i && p->toks[p->i - 1 - base_stars].kind == TC_TK_STAR)
-            base_stars++;
+        if (!first_is_fnptr) {
+            while (base_stars < p->i && p->toks[p->i - 1 - base_stars].kind == TC_TK_STAR)
+                base_stars++;
+        }
         bool more_decls = true;
         bool first_decl = true;
         while (more_decls) {
-            Type ft = base_ft;
+            Type ft = first_decl ? first_ft : base_ft;
             size_t stars = 0;
             while (accept(p, TC_TK_STAR)) stars++;
             if (stars != (first_decl ? 0 : base_stars)) {
                 perror_at(p, cur(p).line,
                     str_lit("unsupported pointer level in a struct field declarator"));
+            }
+            if (!first_decl && cur(p).kind == TC_TK_LPAREN &&
+                peek(p, 1).kind == TC_TK_STAR) {
+                try_parse_fnptr_suffix(p, &ft, &fnptr_field_name);
             }
             first_decl = false;
             TcTok fn;
