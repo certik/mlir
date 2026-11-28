@@ -290,6 +290,8 @@ typedef struct {
     // register allocation (shared mlir_regalloc): value -> physical register.
     // Values absent from `rm` live in `spill` (shared global-alloc slots) or `slots`.
     SlotMap       rm;
+    SlotMap       xrm;       // FP value -> XMM register (2..15, caller-saved)
+    bool          has_xrm;
     SlotMap       spill;
     bool          has_spill;
     bool          fast_ra;   // true when mlir_regalloc_fast ran (never maps remat ops)
@@ -350,6 +352,13 @@ static RegTarget x64_regtarget(void) {
 static inline bool val_in_reg(FnCtx *F, MLIR_ValueHandle v, uint8_t *reg) {
     int32_t r;
     if (sm_get_fast(&F->rm, v, &r)) { *reg = (uint8_t)r; return true; }
+    return false;
+}
+// True (with *xreg set) if FP value `v` has a physical XMM register home (xmm2..xmm15).
+static inline bool val_in_xmm(FnCtx *F, MLIR_ValueHandle v, uint8_t *xreg) {
+    if (!F->has_xrm) return false;
+    int32_t r;
+    if (sm_get_fast(&F->xrm, v, &r)) { *xreg = (uint8_t)r; return true; }
     return false;
 }
 
@@ -829,8 +838,10 @@ static string strip_at(string s) {
     return s;
 }
 
-// Forward decl: defined in mlir_llvm_to_x64_emit.inc.
+// Forward decls: defined in mlir_llvm_to_x64_emit.inc.
 static bool x64_ensure_global_in_gmap(FnCtx *F, string gn, uint32_t *out_off);
+static void movq_xmm_gpr(FnCtx *F, uint8_t xmm, uint8_t gpr);
+static void movq_gpr_xmm(FnCtx *F, uint8_t gpr, uint8_t xmm);
 
 static bool x64_is_wasm_data_sym(string gn) {
     return gn.size >= 8 && memcmp(gn.str, "__wasm_", 7) == 0;
@@ -900,6 +911,8 @@ static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
         }
     }
     if (!F->fast_ra) {
+        uint8_t xH;
+        if (val_in_xmm(F, v, &xH)) { movq_gpr_xmm(F, reg, xH); return; }
         uint8_t rH;
         if (val_in_reg(F, v, &rH)) { mov_rr(F, reg, rH, w); return; }
         int32_t slot;
@@ -916,6 +929,8 @@ static inline void load_val(FnCtx *F, MLIR_ValueHandle v, uint8_t reg) {
     load_val_w(F, v, reg, val_w(F->ctx, v));
 }
 static void store_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
+    uint8_t xH;
+    if (val_in_xmm(F, v, &xH)) { movq_xmm_gpr(F, xH, reg); return; }
     uint8_t rH;
     if (val_in_reg(F, v, &rH)) { mov_rr(F, rH, reg, w); return; }
     int32_t slot;
@@ -940,12 +955,15 @@ static inline uint8_t val_reg_or_load(FnCtx *F, MLIR_ValueHandle v, uint8_t scra
     if (F->fast_ra) {
         if (val_in_reg(F, v, &rH)) return rH;
     } else {
-        MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
-        int64_t dummy;
-        if ((def == MLIR_INVALID_HANDLE ||
-             (!x64_is_remat_type(MLIR_GetOpType(F->ctx, def)) && !is_const(F->ctx, def, &dummy))) &&
-            val_in_reg(F, v, &rH))
-            return rH;
+        uint8_t xH;
+        if (!val_in_xmm(F, v, &xH)) {
+            MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
+            int64_t dummy;
+            if ((def == MLIR_INVALID_HANDLE ||
+                 (!x64_is_remat_type(MLIR_GetOpType(F->ctx, def)) && !is_const(F->ctx, def, &dummy))) &&
+                val_in_reg(F, v, &rH))
+                return rH;
+        }
     }
     load_val_w(F, v, scratch, w);
     return scratch;
