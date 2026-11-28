@@ -1867,3 +1867,9 @@ name = "diag_filename_emit"
 targets = ["native", "wasm", "macho", "elf"]
 # Emit diagnostics include the source filename (#338).
 expected_compile_error = "diag_filename_emit.tc:2:"
+
+[[test]]
+name = "stdlib_math"
+source = "tests/stdlib_math.tc"
+targets = ["native", "wasm", "elf", "macho"]
+expected_stdout = "0 1 1 0 1024 4 2 3\n0 1 256\n"
