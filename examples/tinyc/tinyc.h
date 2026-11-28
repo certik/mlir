@@ -322,15 +322,12 @@ typedef struct {
 DEFINE_VECTOR_FOR_TYPE(Func*, VecFuncPtr)
 
 typedef struct {
-    string name;
-    Type   type;        // field type. May be TY_I32, TY_F32, TY_STRUCT
-                        // (nested by-value struct), TY_PTR_STRUCT
-                        // (pointer to struct, possibly self-referencing),
-                        // TY_PTR_CHAR (char*), or one of the array kinds:
-                        // TY_ARRAY_I32 (1D / 2D int), TY_ARRAY_F32 (1D / 2D
-                        // float), TY_ARRAY_PTR_STRUCT (struct T*[N]),
-                        // TY_ARRAY_PTR_CHAR (char*[N]).
-                        // TY_ARRAY_STRUCT is not allowed in fields yet.
+    string  name;
+    Type    type;        // field type.
+    uint8_t bit_width;   // bit-field width in bits (0 for normal fields or `: 0`)
+    bool    is_bitfield; // true for any `: N` bit-field (including `: 0`)
+    uint8_t bit_offset;  // bit offset within its backing storage unit
+    int     llvm_field_idx; // backing LLVM struct field index
 } StructField;
 
 DEFINE_VECTOR_FOR_TYPE(StructField, VecStructField)
@@ -340,6 +337,7 @@ typedef struct StructDef {
     VecStructField fields;
     int            line;
     bool           is_union;
+    bool           layout_computed;
 } StructDef;
 
 DEFINE_VECTOR_FOR_TYPE(StructDef*, VecStructDefPtr)

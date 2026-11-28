@@ -1831,3 +1831,9 @@ targets = ["native", "wasm", "macho", "elf"]
 # Remaining #339 declarators: anonymous struct globals, function returning
 # fnptr, pointer to fn returning fnptr, and local/global arrays of fnptrs.
 expected_stdout = "10 10 11 12\nhello\nhello\n6 10\n"
+
+[[test]]
+name = "bitfields"
+targets = ["native", "wasm", "macho", "elf"]
+# Bit-fields: SysV packing, signed/unsigned extraction, read-modify-write, :0 (#336).
+expected_stdout = "1 5 9 8\n-3 11 19 8\n6 25 3 2\n"
