@@ -2642,14 +2642,18 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
     // and detect 1-op top-tested loop headers (`label H ; cmp/test ; jcc EXIT ; label BODY`)
     // for bottom-test loop rotation at backward `jmp H`.
     MLIR_OpHandle *rot_cmp  = NULL;
+    MLIR_OpHandle *rot_jcc  = NULL;
     int           *rot_cc   = NULL;
     int           *rot_exit = NULL;
     int           *rot_body = NULL;
+    uint32_t      *rot_exit_off = NULL;
     if (g_x64_opt_level >= 1) {
-        rot_cmp  = (MLIR_OpHandle *)calloc(need, sizeof(MLIR_OpHandle));
-        rot_cc   = (int *)malloc(need * sizeof(int));
-        rot_exit = (int *)malloc(need * sizeof(int));
-        rot_body = (int *)malloc(need * sizeof(int));
+        rot_cmp      = (MLIR_OpHandle *)calloc(need, sizeof(MLIR_OpHandle));
+        rot_jcc      = (MLIR_OpHandle *)calloc(need, sizeof(MLIR_OpHandle));
+        rot_cc       = (int *)malloc(need * sizeof(int));
+        rot_exit     = (int *)malloc(need * sizeof(int));
+        rot_body     = (int *)malloc(need * sizeof(int));
+        rot_exit_off = (uint32_t *)calloc(need, sizeof(uint32_t));
         for (size_t i = 0; i < n_ops; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
             MLIR_OpType ty = MLIR_GetOpType(ctx, op);
@@ -2673,15 +2677,44 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
                             if (is_cmp) {
                                 size_t i2 = x64_next_live(ctx, blk, i1 + 1, n_ops);
                                 if (i2 < n_ops && MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, i2)) == OP_TYPE_X64_JCC) {
+                                    MLIR_OpHandle op2 = MLIR_GetBlockOp(ctx, blk, i2);
+                                    uint64_t v2 = (uint64_t)MLIR_GetOpInlineI64(ctx, op2);
+                                    int jcc_cc = (int)(v2 & 15);
+                                    int jcc_tgt = (int)(uint32_t)(v2 >> 32);
                                     size_t i3 = x64_next_live(ctx, blk, i2 + 1, n_ops);
                                     if (i3 < n_ops && MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, i3)) == OP_TYPE_X64_LABEL) {
-                                        uint64_t v2 = (uint64_t)MLIR_GetOpInlineI64(ctx, MLIR_GetBlockOp(ctx, blk, i2));
+                                        // Case 1: `label H ; cmp ; jcc EXIT ; label BODY`
                                         int b_id = (int)MLIR_GetOpInlineI64(ctx, MLIR_GetBlockOp(ctx, blk, i3));
                                         if ((size_t)b_id < need) {
                                             rot_cmp[(size_t)id]  = op1;
-                                            rot_cc[(size_t)id]   = (int)(v2 & 15);
-                                            rot_exit[(size_t)id] = (int)(uint32_t)(v2 >> 32);
+                                            rot_cc[(size_t)id]   = jcc_cc;
+                                            rot_exit[(size_t)id] = jcc_tgt;
                                             rot_body[(size_t)id] = b_id;
+                                        }
+                                    } else if ((size_t)jcc_tgt < need) {
+                                        // Case 2: `label H ; cmp ; jcc BODY ; [0..4 exit ops] ; jmp EXIT ; label BODY`
+                                        size_t p = i3;
+                                        int steps = 0;
+                                        while (p < n_ops && steps < 5) {
+                                            MLIR_OpType tp = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, p));
+                                            if (tp == OP_TYPE_X64_JMP) {
+                                                size_t q = x64_next_live(ctx, blk, p + 1, n_ops);
+                                                if (q < n_ops &&
+                                                    MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, q)) == OP_TYPE_X64_LABEL &&
+                                                    (int)MLIR_GetOpInlineI64(ctx, MLIR_GetBlockOp(ctx, blk, q)) == jcc_tgt) {
+                                                    rot_cmp[(size_t)id]  = op1;
+                                                    rot_jcc[(size_t)id]  = op2;
+                                                    rot_cc[(size_t)id]   = jcc_cc ^ 1; // inverted: bcc = jcc_cc -> BODY!
+                                                    rot_exit[(size_t)id] = -1;         // use rot_exit_off[id]!
+                                                    rot_body[(size_t)id] = jcc_tgt;
+                                                }
+                                                break;
+                                            }
+                                            if (tp == OP_TYPE_X64_LABEL || tp == OP_TYPE_X64_JCC ||
+                                                tp == OP_TYPE_X64_CALL_SYM || tp == OP_TYPE_X64_CALL_REG)
+                                                break;
+                                            p = x64_next_live(ctx, blk, p + 1, n_ops);
+                                            steps++;
                                         }
                                     }
                                 }
@@ -3002,14 +3035,25 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
                     add_fix(F, blbl, fld);
                 }
                 // Fall through if next live op is `label rot_exit[lbl]`!
-                size_t nxt = x64_next_live(ctx, blk, i + 1, n_ops);
                 int elbl = rot_exit[lbl];
-                bool fall_exit = (nxt < n_ops &&
-                                  MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, nxt)) == OP_TYPE_X64_LABEL &&
-                                  (int)MLIR_GetOpInlineI64(ctx, MLIR_GetBlockOp(ctx, blk, nxt)) == elbl);
-                if (!fall_exit) {
-                    eb(F, 0xE9); uint32_t fld = here(F); e32(F, 0);
-                    add_fix(F, elbl, fld);
+                if (elbl < 0) {
+                    // Case 2: jump straight to the exit-edge code right after jcc in header!
+                    int32_t erel = (int32_t)rot_exit_off[lbl] - (int32_t)(here(F) + 2);
+                    if (erel >= -128 && erel <= 127) {
+                        eb(F, 0xEB); eb(F, (uint8_t)(int8_t)erel);
+                    } else {
+                        eb(F, 0xE9);
+                        e32(F, (uint32_t)((int32_t)rot_exit_off[lbl] - (int32_t)(here(F) + 4)));
+                    }
+                } else {
+                    size_t nxt = x64_next_live(ctx, blk, i + 1, n_ops);
+                    bool fall_exit = (nxt < n_ops &&
+                                      MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, nxt)) == OP_TYPE_X64_LABEL &&
+                                      (int)MLIR_GetOpInlineI64(ctx, MLIR_GetBlockOp(ctx, blk, nxt)) == elbl);
+                    if (!fall_exit) {
+                        eb(F, 0xE9); uint32_t fld = here(F); e32(F, 0);
+                        add_fix(F, elbl, fld);
+                    }
                 }
                 break;
             }
@@ -3038,6 +3082,11 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             eb(F, 0x0F); eb(F, (uint8_t)(0x80 + cc));
             uint32_t fld = here(F); e32(F, 0);
             add_fix(F, lbl, fld);
+            if (rot_jcc) {
+                for (size_t r = 0; r < need; r++) {
+                    if (rot_jcc[r] == op) { rot_exit_off[r] = here(F); break; }
+                }
+            }
             break;
         }
         case OP_TYPE_X64_JTAB_DISPATCH: {
@@ -3169,7 +3218,7 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         }
     }
 
-    free(rot_cmp); free(rot_cc); free(rot_exit); free(rot_body);
+    free(rot_cmp); free(rot_jcc); free(rot_cc); free(rot_exit); free(rot_body); free(rot_exit_off);
     for (size_t i = 0; i < F->n_fix; i++) {
         int tb = F->fix[i].target_block;
         uint32_t fld = F->fix[i].field_off;

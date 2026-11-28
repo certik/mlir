@@ -21,6 +21,9 @@ void mlir_llvm_tre(MLIR_Context *ctx, MLIR_OpHandle module);
 // Simplify-CFG: thread branches through empty forwarding blocks & remove dead blocks.
 void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module);
 
+// Constant folding, algebraic identities, and constant-condition branch folding.
+void mlir_llvm_constfold(MLIR_Context *ctx, MLIR_OpHandle module);
+
 #ifdef __cplusplus
 }
 #endif

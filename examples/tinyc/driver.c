@@ -1875,6 +1875,7 @@ static int tinyc_main(void) {
                 mlir_llvm_inline(ctx, module);
                 mlir_llvm_tre(ctx, module);
             }
+            mlir_llvm_constfold(ctx, module);
             mlir_llvm_simplify_cfg(ctx, module);
             uint64_t t_lcse = ts_now();
             mlir_llvm_load_cse(ctx, module);
@@ -1882,6 +1883,7 @@ static int tinyc_main(void) {
             uint64_t t_gvn = ts_now();
             mlir_llvm_arith_gvn(ctx, module);
             ts_add(TS_ARITH_GVN, t_gvn);
+            mlir_llvm_constfold(ctx, module);
             uint64_t t_dce = ts_now();
             mlir_llvm_dce(ctx, module);
             mlir_llvm_licm(ctx, module);
