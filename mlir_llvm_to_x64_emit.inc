@@ -619,6 +619,55 @@ void mlir_llvm_to_x64_set_opt_level(int level) { g_x64_opt_level = level; }
 
 static uint64_t x64_clock(void) { return g_x64_times ? platform_clock_ns() : 0; }
 
+// Parallel-move call operands op[arg_base .. arg_base + n_reg - 1] into
+// ARG_REGS[0 .. n_reg - 1]. Uses RAX (not R11) as cycle-break temp so indirect
+// call targets held in R11 remain intact.
+static void emit_parallel_arg_moves(FnCtx *F, MLIR_OpHandle op, size_t arg_base, size_t n_reg) {
+    if (n_reg == 0) return;
+    MLIR_ValueHandle src_v[6];
+    int     src_r[6], dst_r[6], mv_w[6];
+    int32_t src_s[6];
+    uint8_t done[6];
+    size_t  rem = 0;
+    for (size_t i = 0; i < n_reg; i++) {
+        src_v[i] = MLIR_GetOpOperand(F->ctx, op, arg_base + i);
+        x64_val_home(F, src_v[i], true, &src_r[i], &src_s[i]);
+        dst_r[i] = (int)ARG_REGS[i];
+        mv_w[i]  = val_w(F->ctx, src_v[i]);
+        if (src_r[i] == dst_r[i]) {
+            done[i] = 1;
+        } else {
+            done[i] = 0;
+            rem++;
+        }
+    }
+    while (rem > 0) {
+        bool progress = false;
+        for (size_t i = 0; i < n_reg; i++) {
+            if (done[i]) continue;
+            bool blocked = false;
+            for (size_t j = 0; j < n_reg; j++) {
+                if (!done[j] && j != i && src_r[j] == dst_r[i]) { blocked = true; break; }
+            }
+            if (blocked) continue;
+            if (src_r[i] >= 0) mov_rr(F, (uint8_t)dst_r[i], (uint8_t)src_r[i], mv_w[i]);
+            else               load_val_w(F, src_v[i], (uint8_t)dst_r[i], mv_w[i]);
+            done[i] = 1;
+            rem--;
+            progress = true;
+        }
+        if (!progress) {
+            size_t k = 0;
+            while (k < n_reg && done[k]) k++;
+            int saved = dst_r[k];
+            mov_rr(F, RAX, (uint8_t)saved, 1);
+            for (size_t j = 0; j < n_reg; j++) {
+                if (!done[j] && src_r[j] == saved) src_r[j] = RAX;
+            }
+        }
+    }
+}
+
 // SysV AMD64 argument marshaling for llvm.call. `arg_base` skips the fn-pointer
 // operand on indirect calls. Returns stack-arg count and alignment pad for cleanup.
 static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
@@ -643,8 +692,7 @@ static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
         load_val(F, MLIR_GetOpOperand(F->ctx, op, arg_base + i - 1), RAX);
         x64_emit1(F, OP_TYPE_X64_PUSH_R, RAX);
     }
-    for (size_t i = 0; i < reg_cutoff; i++)
-        load_val(F, MLIR_GetOpOperand(F->ctx, op, arg_base + i), ARG_REGS[i]);
+    emit_parallel_arg_moves(F, op, arg_base, reg_cutoff);
     if (is_vararg_call) alu_rr(F, 0x31, RAX, RAX, 0);     // xor eax, eax (AL = # xmm regs)
     *nstack_out = nstack;
     *pad_out = pad;
@@ -991,8 +1039,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
                 load_val(F, MLIR_GetOpOperand(ctx, op, 6), RAX);
                 x64_emit1(F, OP_TYPE_X64_PUSH_R, RAX);       // push rax (a6)
-                for (size_t i = 0; i < 6; i++)
-                    load_val(F, MLIR_GetOpOperand(ctx, op, i), ARG_REGS[i]);
+                emit_parallel_arg_moves(F, op, 0, 6);
                 emit_direct_call(F, callee, refs);
                 x64_emit1(F, OP_TYPE_X64_ADD_RSP, 8);        // add rsp, 8
                 if (MLIR_GetOpNumResults(ctx, op) == 1)
@@ -1063,17 +1110,17 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             return;
         }
         load_val(F, MLIR_GetOpOperand(ctx, op, 0), RCX);               // delta
-        lea_rip_data(F, RSI, off);
-        load_mem(F, RSI, RSI, 4, false);                        // rsi = old
-        mov_rr(F, RDX, RSI, 0);                                  // rdx = old
+        lea_rip_data(F, R11, off);
+        load_mem(F, R11, R11, 4, false);                        // r11 = old
+        mov_rr(F, RDX, R11, 0);                                  // rdx = old
         alu_rr(F, 0x01, RDX, RCX, 0);                            // rdx = old+delta
         mov_ri(F, RCX, 65536, 0);
         alu_rr(F, 0x39, RDX, RCX, 0);                            // cmp new, cap
-        cmovcc(F, RDX, RSI, CC_A, 0);                              // rdx = ok? new : old
+        cmovcc(F, RDX, R11, CC_A, 0);                              // rdx = ok? new : old
         lea_rip_data(F, RAX, off);
         store_mem(F, RAX, RDX, 4);
         mov_ri(F, RAX, -1, 0);
-        cmovcc(F, RAX, RSI, CC_BE, 0);                           // rax = ok? old : -1
+        cmovcc(F, RAX, R11, CC_BE, 0);                           // rax = ok? old : -1
         store_val(F, r, RAX);
         return;
     }
@@ -2363,15 +2410,55 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         store_rbp(&F, F.cs_base + 8 * (j + 1), F.cs_reg[j], 1);
 
     // --- entry params: incoming arg regs -> entry block-arg homes (reg/slot).
-    //     Homes never alias an incoming arg register (arg regs are out of the
-    //     pool), so the sequential moves need no parallel-move resolution.
+    //     Uses parallel-move resolution (R11 cycle-break temp) because RDI/RSI/
+    //     R8/R9 are in the allocatable caller-saved pool.
     //     Params 6.. arrive on the caller's stack at [rbp+16], [rbp+24], ... ---
     if (nb > 0) {
         MLIR_BlockHandle e0 = MLIR_GetRegionBlock(ctx, reg, 0);
         size_t na = MLIR_GetBlockNumArgs(ctx, e0);
         F.n_fixed = (uint32_t)na;
-        for (size_t a = 0; a < na && a < 6; a++)
-            store_val(&F, MLIR_GetBlockArg(ctx, e0, a), ARG_REGS[a]);
+        size_t n_reg = na < 6 ? na : 6;
+        if (n_reg > 0) {
+            int     src_r[6], dst_r[6], mv_w[6];
+            int32_t dst_s[6];
+            uint8_t done[6];
+            size_t  rem = 0;
+            for (size_t a = 0; a < n_reg; a++) {
+                MLIR_ValueHandle av = MLIR_GetBlockArg(ctx, e0, a);
+                src_r[a] = (int)ARG_REGS[a];
+                x64_val_home(&F, av, false, &dst_r[a], &dst_s[a]);
+                mv_w[a] = val_w(ctx, av);
+                if (dst_r[a] == src_r[a]) { done[a] = 1; }
+                else { done[a] = 0; rem++; }
+            }
+            while (rem > 0) {
+                bool progress = false;
+                for (size_t a = 0; a < n_reg; a++) {
+                    if (done[a]) continue;
+                    bool blocked = false;
+                    if (dst_r[a] >= 0) {
+                        for (size_t j = 0; j < n_reg; j++) {
+                            if (!done[j] && j != a && src_r[j] == dst_r[a]) { blocked = true; break; }
+                        }
+                    }
+                    if (blocked) continue;
+                    if (dst_r[a] >= 0) mov_rr(&F, (uint8_t)dst_r[a], (uint8_t)src_r[a], mv_w[a]);
+                    else               store_rbp(&F, dst_s[a], (uint8_t)src_r[a], mv_w[a]);
+                    done[a] = 1;
+                    rem--;
+                    progress = true;
+                }
+                if (!progress) {
+                    size_t k = 0;
+                    while (k < n_reg && done[k]) k++;
+                    int saved = dst_r[k];
+                    mov_rr(&F, R11, (uint8_t)saved, 1);
+                    for (size_t j = 0; j < n_reg; j++) {
+                        if (!done[j] && src_r[j] == saved) src_r[j] = R11;
+                    }
+                }
+            }
+        }
         for (size_t a = 6; a < na; a++) {
             int32_t disp = (int32_t)(16 + (a - 6) * 8);   // [rbp + disp]
             load_rbp(&F, RAX, -disp, 1);
