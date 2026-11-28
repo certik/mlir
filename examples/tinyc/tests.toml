@@ -1843,3 +1843,9 @@ name = "elf_setjmp_longjmp"
 targets = ["elf"]
 # __builtin_setjmp / __builtin_longjmp on x86_64/ELF (#337).
 expected_stdout = "first\ncaught 42\nzero-becomes 1\n"
+
+[[test]]
+name = "stdlib_math"
+source = "tests/stdlib_math.tc"
+targets = ["native", "wasm", "elf", "macho"]
+expected_stdout = "0 1 1 0 1024 4 2 3\n0 1 256\n"

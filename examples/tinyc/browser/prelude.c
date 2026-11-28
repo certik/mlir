@@ -28,6 +28,7 @@
 #include "../../../corec-stdlib/corec/base/string.c"
 #include "../../../corec-stdlib/corec/base/numconv.c"
 #include "../../../corec-stdlib/corec/base/format.c"
+#include "../../../corec-stdlib/corec/base/math.c"
 #include "../../../corec-stdlib/corec/base/strbuf.c"
 #include "../../../corec-stdlib/corec/base/io.c"
 #include "../../../corec-stdlib/corec/base/buddy.c"
@@ -37,5 +38,6 @@
 #include "../../../corec-stdlib/stdlib/stdlib.c"
 #include "../../../corec-stdlib/stdlib/stdio.c"
 #include "../../../corec-stdlib/stdlib/printf.c"
+#include "../../../corec-stdlib/stdlib/math_impl.c"
 
 #include "../../../corec-stdlib/corec/platform/platform_wasm.c"
