@@ -670,16 +670,23 @@ static inline void modrm_mem_disp(FnCtx *F, uint8_t reg, uint8_t base, int32_t d
 }
 // Emit ModRM + SIB (+ disp8=0 for rbp/r13) for [base + idx * (1<<scale)].
 // Caller must guarantee idx != RSP (4).
-static inline void modrm_mem_sib(FnCtx *F, uint8_t reg, uint8_t base, uint8_t idx, int scale) {
+static inline void modrm_mem_sib_disp(FnCtx *F, uint8_t reg, uint8_t base, uint8_t idx, int scale, int32_t disp) {
     uint8_t sib = (uint8_t)(((scale & 3) << 6) | ((idx & 7) << 3) | (base & 7));
-    if ((base & 7) == 5) {
-        modrm(F, 1, reg, 4);
-        eb(F, sib);
-        eb(F, 0);
-    } else {
+    if (disp == 0 && (base & 7) != 5) {
         modrm(F, 0, reg, 4);
         eb(F, sib);
+    } else if (disp >= -128 && disp <= 127) {
+        modrm(F, 1, reg, 4);
+        eb(F, sib);
+        eb(F, (uint8_t)(int8_t)disp);
+    } else {
+        modrm(F, 2, reg, 4);
+        eb(F, sib);
+        e32(F, (uint32_t)disp);
     }
+}
+static inline void modrm_mem_sib(FnCtx *F, uint8_t reg, uint8_t base, uint8_t idx, int scale) {
+    modrm_mem_sib_disp(F, reg, base, idx, scale, 0);
 }
 static void load_mem_disp(FnCtx *F, uint8_t dst, uint8_t base, int bytes, bool sgn, int32_t disp) {
     if (F->x64_blk) {
@@ -709,27 +716,27 @@ static void store_mem_disp(FnCtx *F, uint8_t base, uint8_t src, int bytes, int32
     else if (bytes == 4) { rex(F,0,src,0,base); eb(F,0x89); modrm_mem_disp(F,src,base,disp); }
     else                 { rex(F,1,src,0,base); eb(F,0x89); modrm_mem_disp(F,src,base,disp); }
 }
-static void load_mem_sib(FnCtx *F, uint8_t dst, uint8_t base, uint8_t idx, int scale, int bytes, bool sgn) {
-    if (bytes == 8)      { rex(F,1,dst,idx,base); eb(F,0x8B); modrm_mem_sib(F,dst,base,idx,scale); }
-    else if (bytes == 4) { rex(F,0,dst,idx,base); eb(F,0x8B); modrm_mem_sib(F,dst,base,idx,scale); }
-    else if (bytes == 2) { rex(F,1,dst,idx,base); eb(F,0x0F); eb(F, sgn?0xBF:0xB7); modrm_mem_sib(F,dst,base,idx,scale); }
-    else                 { rex(F,1,dst,idx,base); eb(F,0x0F); eb(F, sgn?0xBE:0xB6); modrm_mem_sib(F,dst,base,idx,scale); }
+static void load_mem_sib(FnCtx *F, uint8_t dst, uint8_t base, uint8_t idx, int scale, int bytes, bool sgn, int32_t disp) {
+    if (bytes == 8)      { rex(F,1,dst,idx,base); eb(F,0x8B); modrm_mem_sib_disp(F,dst,base,idx,scale,disp); }
+    else if (bytes == 4) { rex(F,0,dst,idx,base); eb(F,0x8B); modrm_mem_sib_disp(F,dst,base,idx,scale,disp); }
+    else if (bytes == 2) { rex(F,1,dst,idx,base); eb(F,0x0F); eb(F, sgn?0xBF:0xB7); modrm_mem_sib_disp(F,dst,base,idx,scale,disp); }
+    else                 { rex(F,1,dst,idx,base); eb(F,0x0F); eb(F, sgn?0xBE:0xB6); modrm_mem_sib_disp(F,dst,base,idx,scale,disp); }
 }
-static void store_mem_sib(FnCtx *F, uint8_t base, uint8_t idx, uint8_t src, int scale, int bytes) {
+static void store_mem_sib(FnCtx *F, uint8_t base, uint8_t idx, uint8_t src, int scale, int bytes, int32_t disp) {
     if (bytes == 1) {
         if (src >= 4 && src < 8 && idx < 8 && base < 8) eb(F, 0x40);
         else rex(F,0,src,idx,base);
-        eb(F,0x88); modrm_mem_sib(F,src,base,idx,scale);
+        eb(F,0x88); modrm_mem_sib_disp(F,src,base,idx,scale,disp);
     }
-    else if (bytes == 2) { eb(F,0x66); rex(F,0,src,idx,base); eb(F,0x89); modrm_mem_sib(F,src,base,idx,scale); }
-    else if (bytes == 4) { rex(F,0,src,idx,base); eb(F,0x89); modrm_mem_sib(F,src,base,idx,scale); }
-    else                 { rex(F,1,src,idx,base); eb(F,0x89); modrm_mem_sib(F,src,base,idx,scale); }
+    else if (bytes == 2) { eb(F,0x66); rex(F,0,src,idx,base); eb(F,0x89); modrm_mem_sib_disp(F,src,base,idx,scale,disp); }
+    else if (bytes == 4) { rex(F,0,src,idx,base); eb(F,0x89); modrm_mem_sib_disp(F,src,base,idx,scale,disp); }
+    else                 { rex(F,1,src,idx,base); eb(F,0x89); modrm_mem_sib_disp(F,src,base,idx,scale,disp); }
 }
-// mov BYTE PTR [base + idx*(1<<scale)], imm8   ([REX] C6 /0 SIB ib)
-static void store_mem_sib_imm8(FnCtx *F, uint8_t base, uint8_t idx, int scale, uint8_t imm8) {
+// mov BYTE PTR [base + idx*(1<<scale) + disp], imm8   ([REX] C6 /0 SIB [disp] ib)
+static void store_mem_sib_imm8(FnCtx *F, uint8_t base, uint8_t idx, int scale, uint8_t imm8, int32_t disp) {
     rex(F, 0, 0, idx, base);
     eb(F, 0xC6);
-    modrm_mem_sib(F, 0, base, idx, scale);
+    modrm_mem_sib_disp(F, 0, base, idx, scale, disp);
     eb(F, imm8);
 }
 static void lea_mem_disp(FnCtx *F, uint8_t dst, uint8_t base, int32_t disp) {
