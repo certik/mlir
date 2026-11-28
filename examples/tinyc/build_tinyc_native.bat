@@ -14,7 +14,7 @@ set NATIVE_C=mlir_api_impl.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate
 cl /nologo /O2 /std:c11 /Zc:preprocessor /MD /I corec /I . /c %COREC_C% %TINYC_C% %NATIVE_C% tests\upstream_main.c
 if errorlevel 1 exit /b 1
 
-cl /nologo /O2 /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
+cl /nologo /O2 /Oi- /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
 if errorlevel 1 exit /b 1
 
 link /nologo /out:tinyc_native.exe ^

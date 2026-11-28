@@ -17,7 +17,7 @@ set TINYC_C=examples\tinyc\lex.c examples\tinyc\preprocess.c examples\tinyc\pars
 cl /nologo /O2 /std:c11 /Zc:preprocessor /MD /DTINYC_HAS_UPSTREAM /I corec /I . /c %COREC_C% %TINYC_C% tests\upstream_main.c
 if errorlevel 1 exit /b 1
 
-cl /nologo /O2 /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
+cl /nologo /O2 /Oi- /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
 if errorlevel 1 exit /b 1
 
 cl /nologo /O2 /std:c++17 /MD /EHsc /GR- /I corec /I . /I "%CONDA_PREFIX%\Library\include" /c mlir_api_impl_upstream.cpp
