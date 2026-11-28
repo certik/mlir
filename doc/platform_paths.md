@@ -112,28 +112,21 @@ ordinary corec C, compiled by tinyC.
 
 ## Does it always go via corec?
 
-**Yes, except for two test-harness accommodations** in
-`examples/tinyc/run_tinyc_tests.py`. They are properties of how the *test
-runner* builds programs, not of the compiler — the compiler always emits
-`platform_*` / WASI calls and binds them to corec implementations when given
-them.
+**Yes, except for one test-harness accommodation** in
+`examples/tinyc/run_tinyc_tests.py`:
 
-1. **Windows `native`** (gated by `use_unity_source()` returning `False` for
-   `IS_WIN and TARGET == "native"`). The harness compiles each test `.tc`
-   *directly* against the MSVCRT, with no unity, no corec-stdlib, and no
-   `platform_windows.c`. The test's `printf` binds to MSVCRT's. Reason: tinyC
-   cannot yet parse `platform_windows.c`'s `__declspec(dllimport)` /
-   `__stdcall`, and the suite only needs libc-providable symbols. So Windows
-   `native` is both runtime-shim-free *and* corec-free on this path.
-2. **`macho-llvm` cross-compiled on a non-Apple host** (e.g. Linux building a
-   Mach-O; gated by `uses_inline_platform()`). The harness substitutes a small
-   inline platform shim (a ~45-line block synthesized as Python strings)
-   instead of `platform_macos.c`, because libSystem cannot be linked off-Apple.
-   Pure cross-compilation artifact; on an actual macOS host this target uses
-   the real `platform_macos.c`.
+- **Windows `native`** (gated by `use_unity_source()` returning `False` for
+  `IS_WIN and TARGET == "native"`). The harness compiles each test `.tc`
+  *directly* against MSVCRT, with no unity, no `corec-stdlib`, and no
+  `platform_windows.c`, because `tinyc` does not yet parse
+  `platform_windows.c`'s `__declspec(dllimport)` / `__stdcall` (tracked in
+  #427).
 
-Everything else — every backend, on its native host — reaches the OS through
-`corec/platform/platform_<os>.c`.
+Everything else — Linux, macOS, Wasm, and wasm→native lift — reaches the OS
+through `corec/platform/platform_<os>.c` and `corec-stdlib` (including
+`printf.c` and `math_impl.c`), with no Python-synthesized inline platform shims
+and with wasm→native lift forwarding stubs (`platform_init`, `__assert_fail`)
+living in `corec/wasm/wasi_adapter.c`.
 
 ## Deferred (tracked, not "magic runtime")
 
@@ -142,6 +135,3 @@ Everything else — every backend, on its native host — reaches the OS through
   `x28` = linmem base / `x27` = globals base before calling `main`. It is
   native-coupled (PC-relative relocations + reserved-register init) and not
   cleanly expressible as portable C, so it stays a compiler internal.
-- **Compiling `platform_windows.c` with tinyC**: would remove exception (1)
-  above, but needs tinyC parser support for `__declspec(dllimport)` /
-  `__stdcall`. Optional consistency work; Windows is already shim-free.

@@ -210,6 +210,7 @@ struct Expr {
     bool    is_compound;
     bool    sizeof_is_expr;
     bool    is_alignof;
+    uint16_t file_id;
     int line;
     ExprVal val;              // int_value / float_value
     string  name;             // EX_VAR / EX_STR / EX_FIELD / EX_CALL (callee)
@@ -271,6 +272,7 @@ struct Stmt {
     bool decl_is_static;
     bool has_else;
     bool block_no_scope;
+    uint16_t file_id;
     int line;
     // ST_EXPR / ST_RETURN / ST_DECL (init) / ST_IF / ST_WHILE / ST_DO_WHILE / ST_FOR / ST_SWITCH (cond)
     Expr *expr;
@@ -316,6 +318,7 @@ typedef struct {
     string     wasm_import_module;
     string     wasm_import_name;
     string     wasm_export_name;
+    uint16_t   file_id;
     int        line;
 } Func;
 
@@ -335,6 +338,7 @@ DEFINE_VECTOR_FOR_TYPE(StructField, VecStructField)
 typedef struct StructDef {
     string         name;
     VecStructField fields;
+    uint16_t       file_id;
     int            line;
     bool           is_union;
     bool           layout_computed;
@@ -370,6 +374,7 @@ typedef struct {
     string  init_str;       // for TY_PTR_CHAR initialized from string literal
     string  init_array_data;
     struct Expr *init_expr; // `{...}` initializer of a struct / struct array
+    uint16_t file_id;
     int     line;
 } Global;
 
@@ -401,6 +406,10 @@ typedef struct Program {
     // for wasm/macho and for separate-compilation builds where a tinyC-defined
     // variadic function (e.g. corec-stdlib printf) is extern in the caller's TU.
     bool host_varargs;
+    // Interned source file names (1-based file_id indexes source_files[file_id - 1]).
+    string *source_files;
+    size_t  n_source_files;
+    size_t  source_files_cap;
 } Program;
 
 // ---------------- Lexer ----------------
@@ -483,6 +492,7 @@ typedef union {
 typedef struct {
     uint8_t   kind;          // TcTokKind
     uint8_t   flags;         // TC_TOK_F_*
+    uint16_t  file_id;       // 1-based index into source_files (0 = unknown)
     int       line;
     char     *text_str;      // identifier / string literal bytes
     TcTokData d;             // text size / int_value / float_value
@@ -503,6 +513,8 @@ static inline void tc_tok_set_text(TcTok *t, string s) {
 DEFINE_VECTOR_FOR_TYPE(TcTok, VecTcTok)
 
 VecTcTok tinyc_lex(Arena *arena, string src);
+void     tinyc_set_last_lex_files(string *files, size_t n);
+string  *tinyc_last_lex_files(size_t *out_n);
 TcTokKind tinyc_keyword_or_ident(string s);
 TcTok tinyc_lex_number(string text, int line);
 TcTok tinyc_lex_string(Arena *arena, string raw, int line);
