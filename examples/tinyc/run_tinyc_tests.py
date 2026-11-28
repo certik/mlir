@@ -280,7 +280,6 @@ def link_native(obj_path: Path, exe_path: Path, host_sources: list[Path] | None 
             str(obj_path),
             *extra,
             "msvcrt.lib", "ucrt.lib", "vcruntime.lib",
-            "legacy_stdio_definitions.lib",
             "kernel32.lib", "shell32.lib",
             f"/Fe:{exe_path}",
         ])
