@@ -1368,8 +1368,167 @@ static void if_convert_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             MLIR_DetachOp(ctx, term);
             break;
         }
+
+        // Also handle 2-arm symmetric diamonds (`if (c) { ... } else { ... }`)
+        // merging into `mrg_blk` with 1 or 2 integer/pointer block args (e.g. crcu8!).
+        if (MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, bk, MLIR_GetBlockNumOps(ctx, bk) - 1)) == OP_TYPE_LLVM_COND_BR &&
+            nso0 == 0 && nso1 == 0 && s0 != bk && s1 != bk && s0 != s1 &&
+            MLIR_GetBlockNumArgs(ctx, s0) == 0 && MLIR_GetBlockNumArgs(ctx, s1) == 0) {
+            int32_t bi0 = -1, bi1 = -1;
+            uintptr_t k0 = (uintptr_t)s0, k1 = (uintptr_t)s1;
+            size_t st = (k0 * 1099511628211ull) & hmask;
+            while (hk[st]) { if (hk[st] == k0) { bi0 = hv[st]; break; } st = (st + 1) & hmask; }
+            st = (k1 * 1099511628211ull) & hmask;
+            while (hk[st]) { if (hk[st] == k1) { bi1 = hv[st]; break; } st = (st + 1) & hmask; }
+            if (bi0 > 0 && bi1 > 0 && pc[bi0] == 1 && pc[bi1] == 1) {
+                size_t no0 = MLIR_GetBlockNumOps(ctx, s0), no1 = MLIR_GetBlockNumOps(ctx, s1);
+                if (no0 >= 1 && no0 <= 8 && no1 >= 1 && no1 <= 8) {
+                    MLIR_OpHandle t0 = MLIR_GetBlockOp(ctx, s0, no0 - 1);
+                    MLIR_OpHandle t1 = MLIR_GetBlockOp(ctx, s1, no1 - 1);
+                    if (MLIR_GetOpType(ctx, t0) == OP_TYPE_LLVM_BR &&
+                        MLIR_GetOpType(ctx, t1) == OP_TYPE_LLVM_BR) {
+                        MLIR_BlockHandle m0 = MLIR_GetOpSuccessor(ctx, t0, 0);
+                        MLIR_BlockHandle m1 = MLIR_GetOpSuccessor(ctx, t1, 0);
+                        size_t mn = MLIR_GetOpNumSuccessorOperands(ctx, t0, 0);
+                        if (m0 == m1 && mn >= 1 && mn <= 2 &&
+                            MLIR_GetOpNumSuccessorOperands(ctx, t1, 0) == mn &&
+                            MLIR_GetBlockNumArgs(ctx, m0) == mn) {
+                            bool ok_types = true;
+                            for (size_t a = 0; a < mn; a++) {
+                                MLIR_TypeKind mk = MLIR_GetTypeKind(ctx, MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, m0, a)));
+                                if (mk != MLIR_TYPE_KIND_INTEGER && mk != MLIR_TYPE_KIND_LLVM_POINTER) { ok_types = false; break; }
+                            }
+                            bool ok_ops = ok_types;
+                            int n_real = 0;
+                            for (size_t i = 0; i + 1 < no0 && ok_ops; i++) {
+                                MLIR_OpHandle aop = MLIR_GetBlockOp(ctx, s0, i);
+                                if (!ifcvt_is_cheap_pure(ctx, aop)) { ok_ops = false; break; }
+                                MLIR_OpType at = MLIR_GetOpType(ctx, aop);
+                                if (at != OP_TYPE_LLVM_MLIR_CONSTANT && at != OP_TYPE_LLVM_MLIR_ZERO && at != OP_TYPE_LLVM_MLIR_NULL) n_real++;
+                            }
+                            for (size_t i = 0; i + 1 < no1 && ok_ops; i++) {
+                                MLIR_OpHandle aop = MLIR_GetBlockOp(ctx, s1, i);
+                                if (!ifcvt_is_cheap_pure(ctx, aop)) { ok_ops = false; break; }
+                                MLIR_OpType at = MLIR_GetOpType(ctx, aop);
+                                if (at != OP_TYPE_LLVM_MLIR_CONSTANT && at != OP_TYPE_LLVM_MLIR_ZERO && at != OP_TYPE_LLVM_MLIR_NULL) n_real++;
+                            }
+                            if (ok_ops && n_real <= 5) {
+                                size_t insert_pos = MLIR_GetBlockNumOps(ctx, bk) - 1;
+                                for (size_t i = 0; i + 1 < no0; i++) {
+                                    MLIR_OpHandle aop = MLIR_GetBlockOp(ctx, s0, 0);
+                                    MLIR_DetachOp(ctx, aop);
+                                    MLIR_InsertBlockOpAtIndex(ctx, bk, aop, insert_pos++);
+                                }
+                                for (size_t i = 0; i + 1 < no1; i++) {
+                                    MLIR_OpHandle aop = MLIR_GetBlockOp(ctx, s1, 0);
+                                    MLIR_DetachOp(ctx, aop);
+                                    MLIR_InsertBlockOpAtIndex(ctx, bk, aop, insert_pos++);
+                                }
+                                MLIR_ValueHandle cond = MLIR_GetOpOperand(ctx, term, 0);
+                                MLIR_ValueHandle br_args[2];
+                                for (size_t a = 0; a < mn; a++) {
+                                    MLIR_ValueHandle v0 = MLIR_GetOpSuccessorOperand(ctx, t0, 0, a);
+                                    MLIR_ValueHandle v1 = MLIR_GetOpSuccessorOperand(ctx, t1, 0, a);
+                                    if (v0 == v1) {
+                                        br_args[a] = v0;
+                                    } else {
+                                        MLIR_TypeHandle rty = MLIR_GetValueType(ctx, MLIR_GetBlockArg(ctx, m0, a));
+                                        MLIR_ValueHandle sops[3] = { cond, v0, v1 };
+                                        MLIR_OpSpec ssp;
+                                        memset(&ssp, 0, sizeof(ssp));
+                                        ssp.type = OP_TYPE_LLVM_SELECT;
+                                        ssp.operands = sops;
+                                        ssp.n_operands = 3;
+                                        ssp.result_types = &rty;
+                                        ssp.n_results = 1;
+                                        MLIR_OpHandle sop = MLIR_CreateOpFromSpec(ctx, &ssp);
+                                        MLIR_InsertBlockOpAtIndex(ctx, bk, sop, insert_pos++);
+                                        br_args[a] = MLIR_GetOpResult(ctx, sop, 0);
+                                    }
+                                }
+                                uint32_t mn32 = (uint32_t)mn;
+                                MLIR_OpSpec bsp;
+                                memset(&bsp, 0, sizeof(bsp));
+                                bsp.type = OP_TYPE_LLVM_BR;
+                                bsp.operands = br_args;
+                                bsp.n_operands = mn;
+                                bsp.successors = &m0;
+                                bsp.n_successors = 1;
+                                bsp.successor_operand_counts = &mn32;
+                                MLIR_OpHandle new_br = MLIR_CreateOpFromSpec(ctx, &bsp);
+                                MLIR_InsertBlockOpAtIndex(ctx, bk, new_br, insert_pos);
+                                MLIR_DetachOp(ctx, term);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     free(hk); free(hv); free(pc);
+}
+
+// Unwrap redundant `icmp ne(select(c1, 1, 0), 0)` / `icmp ne(zext(c1:i1), 0)` -> `c1`.
+// emit.c wraps C comparisons in select(1,0) for int-typed expressions; unwrapping
+// them lets if-conversion and select lowering use `c1` directly without extra cmovs.
+static void unwrap_bool_selects_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    if (MLIR_GetOpNumRegions(ctx, fn) == 0) return;
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_ICMP) continue;
+            MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
+            if (!pa || MLIR_GetAttributeInteger(ctx, pa) != 1) continue; // ne
+            MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, op, 1);
+            MLIR_OpHandle d1 = MLIR_GetValueDefiningOp(ctx, a1);
+            if (d1 == MLIR_INVALID_HANDLE) continue;
+            MLIR_OpType dt1 = MLIR_GetOpType(ctx, d1);
+            int64_t c1_val = -1;
+            if (dt1 == OP_TYPE_LLVM_MLIR_ZERO) c1_val = 0;
+            else if (dt1 == OP_TYPE_LLVM_MLIR_CONSTANT) {
+                MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, d1, MLIR_KEY_VALUE);
+                if (va != MLIR_INVALID_HANDLE) c1_val = MLIR_GetAttributeInteger(ctx, va);
+            }
+            if (c1_val != 0) continue;
+            MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
+            MLIR_OpHandle d0 = MLIR_GetValueDefiningOp(ctx, a0);
+            if (d0 == MLIR_INVALID_HANDLE) continue;
+            MLIR_OpType dt0 = MLIR_GetOpType(ctx, d0);
+            MLIR_ValueHandle inner = MLIR_INVALID_HANDLE;
+            if (dt0 == OP_TYPE_LLVM_SELECT) {
+                MLIR_ValueHandle st = MLIR_GetOpOperand(ctx, d0, 1);
+                MLIR_ValueHandle sf = MLIR_GetOpOperand(ctx, d0, 2);
+                MLIR_OpHandle dst = MLIR_GetValueDefiningOp(ctx, st);
+                MLIR_OpHandle dsf = MLIR_GetValueDefiningOp(ctx, sf);
+                if (dst != MLIR_INVALID_HANDLE && dsf != MLIR_INVALID_HANDLE &&
+                    MLIR_GetOpType(ctx, dst) == OP_TYPE_LLVM_MLIR_CONSTANT &&
+                    (MLIR_GetOpType(ctx, dsf) == OP_TYPE_LLVM_MLIR_CONSTANT ||
+                     MLIR_GetOpType(ctx, dsf) == OP_TYPE_LLVM_MLIR_ZERO)) {
+                    MLIR_AttributeHandle vat = MLIR_GetOpAttr(ctx, dst, MLIR_KEY_VALUE);
+                    int64_t vt = vat ? MLIR_GetAttributeInteger(ctx, vat) : -1;
+                    int64_t vf = 0;
+                    if (MLIR_GetOpType(ctx, dsf) == OP_TYPE_LLVM_MLIR_CONSTANT) {
+                        MLIR_AttributeHandle vaf = MLIR_GetOpAttr(ctx, dsf, MLIR_KEY_VALUE);
+                        vf = vaf ? MLIR_GetAttributeInteger(ctx, vaf) : -1;
+                    }
+                    if (vt == 1 && vf == 0) inner = MLIR_GetOpOperand(ctx, d0, 0);
+                }
+            } else if (dt0 == OP_TYPE_LLVM_ZEXT) {
+                MLIR_ValueHandle z0 = MLIR_GetOpOperand(ctx, d0, 0);
+                MLIR_TypeHandle zt = MLIR_GetValueType(ctx, z0);
+                if (MLIR_GetTypeKind(ctx, zt) == MLIR_TYPE_KIND_INTEGER &&
+                    MLIR_GetTypeWidth(ctx, zt) == 1)
+                    inner = z0;
+            }
+            if (inner != MLIR_INVALID_HANDLE) {
+                MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetOpResult(ctx, op, 0), inner);
+            }
+        }
+    }
 }
 
 void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module) {
@@ -1382,7 +1541,9 @@ void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module) {
     for (size_t i = 0; i < n; i++) {
         MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
+        unwrap_bool_selects_func(ctx, fn);
         if_convert_func(ctx, fn);
+        unwrap_bool_selects_func(ctx, fn);
         simplify_cfg_func(ctx, fn);
     }
 }
