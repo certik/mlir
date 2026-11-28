@@ -629,7 +629,9 @@ static void x64_val_home(FnCtx *F, MLIR_ValueHandle v, bool is_src,
         MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
         int64_t dummy;
         if (def != MLIR_INVALID_HANDLE &&
-            (x64_is_remat_type(MLIR_GetOpType(F->ctx, def)) || is_const(F->ctx, def, &dummy)))
+            (x64_is_remat_type(MLIR_GetOpType(F->ctx, def)) ||
+             MLIR_GetOpType(F->ctx, def) == OP_TYPE_LLVM_ALLOCA ||
+             is_const(F->ctx, def, &dummy)))
             return;
     }
     uint8_t xH;
@@ -1079,13 +1081,19 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     // select cond, t, f
     case OP_TYPE_LLVM_SELECT: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+        MLIR_ValueHandle vc = MLIR_GetOpOperand(ctx, op, 0);
+        MLIR_ValueHandle vt = MLIR_GetOpOperand(ctx, op, 1);
+        MLIR_ValueHandle vf = MLIR_GetOpOperand(ctx, op, 2);
         int w = val_w(ctx, r);
-        load_val(F, MLIR_GetOpOperand(ctx, op, 2), RAX);   // default = false value
-        load_val(F, MLIR_GetOpOperand(ctx, op, 1), RCX);   // true value
-        load_val(F, MLIR_GetOpOperand(ctx, op, 0), RDX);   // cond
-        alu_rr(F, 0x85, RDX, RDX, 0);                 // test edx, edx
-        cmovnz(F, RAX, RCX, w);                        // cond!=0 -> true value
-        store_val(F, r, RAX);
+        uint8_t rD;
+        bool has_rD = val_in_reg(F, r, &rD);
+        uint8_t rt = val_reg_or_load(F, vt, RCX, w);
+        uint8_t rc = val_reg_or_load(F, vc, RDX, 0);
+        uint8_t dst = (has_rD && rD != rt && rD != rc) ? rD : RAX;
+        load_val_w(F, vf, dst, w);
+        alu_rr(F, 0x85, rc, rc, 0);                   // test rc, rc
+        cmovnz(F, dst, rt, w);                        // cond!=0 -> true value
+        if (!has_rD || dst != rD) store_val_w(F, r, dst, w);
         return;
     }
     // zext / trunc / sext / pointer casts
@@ -1254,8 +1262,9 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         return;
     }
     case OP_TYPE_LLVM_ALLOCA: {
-        // region already reserved in the pre-pass; recover its rbp offset from
-        // the slot map (negative sentinel keyed by the op result is the region).
+        // Under global regalloc (!fast_ra), alloca is rematerialized on demand
+        // via lea_rbp in load_val_w (and bypassed completely by alloca_slot).
+        if (!F->fast_ra) return;
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
         int32_t region;
         if (!vmap_get(&F->slots, x64_region_key(op), &region)) {
