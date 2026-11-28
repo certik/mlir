@@ -6850,28 +6850,35 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
         }
         case ST_SWITCH: {
             // Lower switch as a chain of cf.cond_br tests branching directly
-            // to each case/default's pre-registered ST_LABEL block, followed
-            // by emitting the switch body (which may contain case/default
-            // labels inside nested blocks, like Duff's device or SQLite's
-            // sqlite3VdbeExec).
+            // to each case/default's ST_LABEL block, followed by emitting the
+            // switch body (which may contain case/default labels inside nested
+            // blocks, like Duff's device or SQLite's sqlite3VdbeExec).
+            // Create case blocks *after* the dispatch chain so the CFG stays
+            // in topological order for the Wasm CF-to-SCF raiser.
             EVal cv = emit_expr(e, sc, st->expr);
             MLIR_ValueHandle cond_v = cv.val;
 
             size_t nc = st->extra->switch_cases.size;
-            MLIR_BlockHandle exit_b = new_cfg_block(e);
-
             MLIR_BlockHandle *case_blocks = arena_new_array(e->arena, MLIR_BlockHandle, nc ? nc : 1);
             MLIR_BlockHandle default_b = MLIR_INVALID_HANDLE;
             for (size_t i = 0; i < nc; i++) {
                 string lbl = st->extra->switch_cases.data[i].label;
-                struct LabelBlock *lb = e->labels;
-                while (lb && !str_eq(lb->name, lbl)) lb = lb->next;
-                case_blocks[i] = lb ? lb->block : exit_b;
+                if (i > 0 && str_eq(lbl, st->extra->switch_cases.data[i - 1].label)) {
+                    case_blocks[i] = case_blocks[i - 1];
+                } else {
+                    case_blocks[i] = MLIR_CreateBlock(e->ctx);
+                    struct LabelBlock *lb = arena_new(e->arena, struct LabelBlock);
+                    lb->name = lbl;
+                    lb->block = case_blocks[i];
+                    lb->next = e->labels;
+                    e->labels = lb;
+                }
                 if (st->extra->switch_cases.data[i].is_default &&
                     default_b == MLIR_INVALID_HANDLE) {
                     default_b = case_blocks[i];
                 }
             }
+            MLIR_BlockHandle exit_b = MLIR_CreateBlock(e->ctx);
             MLIR_BlockHandle fall_b = (default_b != MLIR_INVALID_HANDLE) ? default_b : exit_b;
             size_t last_non_default = (size_t)-1;
             for (size_t i = nc; i > 0; i--) {
@@ -6898,6 +6905,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                     }
                 }
             }
+            for (size_t i = 0; i < nc; i++) {
+                if (i > 0 && case_blocks[i] == case_blocks[i - 1]) continue;
+                MLIR_AppendRegionBlock(e->ctx, e->func_region, case_blocks[i]);
+            }
+            MLIR_AppendRegionBlock(e->ctx, e->func_region, exit_b);
 
             // Emit the switch body with `terminated = true` initially so
             // unreachable code before the first case is skipped (while
@@ -7112,6 +7124,11 @@ static void collect_addr_taken(E *e, VecStmtPtr body);
 static void collect_addr_taken_stmt(E *e, Stmt *st) {
     if (!st) return;
     if (st->kind == ST_LABEL) {
+        // Switch case labels (`__sw_*`) are created and appended by ST_SWITCH
+        // right after its dispatch chain so blocks stay in topological order.
+        if (st->name.size >= 5 && memcmp(st->name.str, "__sw_", 5) == 0) {
+            return;
+        }
         struct LabelBlock *lb = arena_new(e->arena, struct LabelBlock);
         lb->name = st->name;
         lb->block = MLIR_CreateBlock(e->ctx);

@@ -2036,19 +2036,6 @@ static Stmt *parse_stmt(P *p) {
         return s;
     }
     if (t.kind == TC_TK_KW_CASE || t.kind == TC_TK_KW_DEFAULT) {
-        bool is_def = (t.kind == TC_TK_KW_DEFAULT);
-        p->i++;
-        int64_t cval = 0;
-        if (!is_def) {
-            int cline = cur(p).line;
-            Expr *cex = parse_ternary(p);
-            if (!parse_const_eval(p, cex, &cval)) {
-                perror_at(p, cline, str_lit("expected integer constant expression in 'case'"));
-            }
-            expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
-        } else {
-            expect(p, TC_TK_COLON, str_lit("expected ':' after default"));
-        }
         int id = p->switch_label_counter++;
         char *buf = arena_alloc(p->arena, 24);
         buf[0] = '_'; buf[1] = '_'; buf[2] = 's'; buf[3] = 'w'; buf[4] = '_';
@@ -2061,16 +2048,33 @@ static Stmt *parse_stmt(P *p) {
         while (tn > 0) buf[pos++] = tmp[--tn];
         buf[pos] = '\0';
         string lbl = (string){.str = buf, .size = pos};
-        if (p->cur_switch) {
-            SwitchCase sc = (SwitchCase){
-                .value = cval,
-                .is_default = is_def,
-                .body_start = p->cur_switch->body.size,
-                .label = lbl,
-            };
-            VecSwitchCase_push_back(p->arena, &p->cur_switch->extra->switch_cases, sc);
-        } else {
-            perror_at(p, t.line, str_lit("'case'/'default' label not within a switch statement"));
+        // Coalesce consecutive `case A: case B: default:` labels into one
+        // shared ST_LABEL / CFG block (crucial for re2c's tokenizer.c).
+        while (cur(p).kind == TC_TK_KW_CASE || cur(p).kind == TC_TK_KW_DEFAULT) {
+            bool is_def = (cur(p).kind == TC_TK_KW_DEFAULT);
+            int cline = cur(p).line;
+            p->i++;
+            int64_t cval = 0;
+            if (!is_def) {
+                Expr *cex = parse_ternary(p);
+                if (!parse_const_eval(p, cex, &cval)) {
+                    perror_at(p, cline, str_lit("expected integer constant expression in 'case'"));
+                }
+                expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
+            } else {
+                expect(p, TC_TK_COLON, str_lit("expected ':' after default"));
+            }
+            if (p->cur_switch) {
+                SwitchCase sc = (SwitchCase){
+                    .value = cval,
+                    .is_default = is_def,
+                    .body_start = p->cur_switch->body.size,
+                    .label = lbl,
+                };
+                VecSwitchCase_push_back(p->arena, &p->cur_switch->extra->switch_cases, sc);
+            } else {
+                perror_at(p, cline, str_lit("'case'/'default' label not within a switch statement"));
+            }
         }
         Stmt *ls = new_stmt(p, ST_LABEL, t.line);
         ls->name = lbl;
