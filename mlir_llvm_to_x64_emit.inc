@@ -1163,12 +1163,15 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         }
         load_val(F, a0, RAX);
         load_val(F, a1, RCX);
+        mov_rr(F, R11, RDX, 1);  // preserve allocatable RDX across cdq/idiv/div
         if (sdiv || srem) {
             x64_emit1(F, OP_TYPE_X64_IDIV, (int64_t)RCX | ((int64_t)w << 8));
         } else {
             x64_emit1(F, OP_TYPE_X64_DIV, (int64_t)RCX | ((int64_t)w << 8));
         }
-        store_val(F, r, (sdiv || udiv) ? RAX : RDX);
+        if (srem || (!sdiv && !udiv)) mov_rr(F, RAX, RDX, 1);
+        mov_rr(F, RDX, R11, 1);
+        store_val(F, r, RAX);
         return;
     }
     // shifts: dst = op0 SH op1(cl / imm)
@@ -4391,9 +4394,7 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                 MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
                 MLIR_OpType ot = MLIR_GetOpType(ctx, op);
                 if (ot == OP_TYPE_LLVM_INTR_VASTART) { fn_has_vastart = true; fn_can_rsp_frame = false; }
-                else if (ot == OP_TYPE_LLVM_SDIV || ot == OP_TYPE_LLVM_UDIV ||
-                         ot == OP_TYPE_LLVM_SREM || ot == OP_TYPE_LLVM_UREM ||
-                         ot == OP_TYPE_LLVM_FPTOUI || ot == OP_TYPE_LLVM_UITOFP) {
+                else if (ot == OP_TYPE_LLVM_FPTOUI || ot == OP_TYPE_LLVM_UITOFP) {
                     fn_can_rdx = false;
                 } else if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL) {
                     fn_has_call = true;
