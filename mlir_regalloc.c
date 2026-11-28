@@ -852,15 +852,61 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         succ_off[n_blocks] = (uint32_t)sc;
         if (has_backedge) {
-            for (size_t ti = 0; ti < n_blocks; ti++) {
-                if (hdr_max_b[ti] >= 0) {
-                    delta[ti] += 1;
-                    delta[(size_t)hdr_max_b[ti] + 1] -= 1;
+            if (n_blocks <= 4096) {
+                // Exact natural-loop depth via backward BFS per loop header:
+                // handles rotated nested loops where an outer latch precedes an
+                // inner loop body (e.g. matrix_mul_matrix depth-3 k-loop).
+                uint32_t *p_off = (uint32_t *)calloc(n_blocks + 1u, sizeof(uint32_t));
+                for (size_t e = 0; e < sc; e++) p_off[succ_idx[e] + 1u]++;
+                for (size_t b = 0; b < n_blocks; b++) p_off[b + 1u] += p_off[b];
+                uint32_t *p_idx = (uint32_t *)malloc((sc ? sc : 1u) * sizeof(uint32_t));
+                uint32_t *p_cur = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
+                memcpy(p_cur, p_off, n_blocks * sizeof(uint32_t));
+                for (size_t b = 0; b < n_blocks; b++) {
+                    for (uint32_t e = succ_off[b]; e < succ_off[b + 1]; e++)
+                        p_idx[p_cur[succ_idx[e]]++] = (uint32_t)b;
                 }
-            }
-            int64_t acc = 0;
-            for (size_t b = 0; b < n_blocks; b++) {
-                acc += delta[b]; loop_depth[b] = acc < 0 ? 0 : (uint32_t)acc;
+                free(p_cur);
+                uint32_t *stamp = (uint32_t *)calloc(n_blocks, sizeof(uint32_t));
+                uint32_t *bfs_q = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
+                for (size_t ti = 0; ti < n_blocks; ti++) {
+                    if (hdr_max_b[ti] < 0) continue;
+                    uint32_t st = (uint32_t)(ti + 1u);
+                    stamp[ti] = st;
+                    loop_depth[ti]++;
+                    size_t qh = 0, qt = 0;
+                    for (uint32_t pe = p_off[ti]; pe < p_off[ti + 1]; pe++) {
+                        uint32_t pb = p_idx[pe];
+                        if (pb >= (uint32_t)ti && stamp[pb] != st) {
+                            stamp[pb] = st;
+                            bfs_q[qt++] = pb;
+                        }
+                    }
+                    while (qh < qt) {
+                        uint32_t u = bfs_q[qh++];
+                        loop_depth[u]++;
+                        for (uint32_t pe = p_off[u]; pe < p_off[u + 1]; pe++) {
+                            uint32_t pb = p_idx[pe];
+                            if (ti > 0 && pb == 0) continue;
+                            if (stamp[pb] != st) {
+                                stamp[pb] = st;
+                                bfs_q[qt++] = pb;
+                            }
+                        }
+                    }
+                }
+                free(bfs_q); free(stamp); free(p_idx); free(p_off);
+            } else {
+                for (size_t ti = 0; ti < n_blocks; ti++) {
+                    if (hdr_max_b[ti] >= 0) {
+                        delta[ti] += 1;
+                        delta[(size_t)hdr_max_b[ti] + 1] -= 1;
+                    }
+                }
+                int64_t acc = 0;
+                for (size_t b = 0; b < n_blocks; b++) {
+                    acc += delta[b]; loop_depth[b] = acc < 0 ? 0 : (uint32_t)acc;
+                }
             }
         }
     }
@@ -1757,6 +1803,199 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
 
             free(pred_idx); free(pred_off); free(sp_list); free(v_blks); free(reg_blks);
         }
+    }
+
+    // --- 4.0c. Post-RA exact-liveness phi-copy recoloring ---
+    // Eliminate remaining register-to-register block-arg copies (e.g. sieve's
+    // count_merged, interp's sp_next, core_state_transition's str_next) by
+    // recoloring either the block-arg dst (Case A) or a block-local src (Case B)
+    // to its copy partner's register whenever exact per-block/in-block liveness
+    // proves zero interference.
+    if (env->phi_coalesce && bw_g && n_blocks > 1 && n_blocks <= 4096 && T->npool <= RA_MAXPOOL) {
+        size_t nb_w = (n_blocks + 63u) / 64u;
+        uint64_t *v_blks = (uint64_t *)malloc(nb_w * sizeof(uint64_t));
+        int32_t *reg_head = (int32_t *)malloc((size_t)T->npool * sizeof(int32_t));
+        int32_t *val_next = (int32_t *)malloc(nv_sz * sizeof(int32_t));
+        uint32_t *pred_off = (uint32_t *)calloc(n_blocks + 1u, sizeof(uint32_t));
+        uint32_t n_edges = succ_off[n_blocks];
+        for (uint32_t e = 0; e < n_edges; e++) pred_off[succ_idx[e] + 1u]++;
+        for (size_t b = 0; b < n_blocks; b++) pred_off[b + 1u] += pred_off[b];
+        uint32_t *pred_idx = (uint32_t *)malloc((n_edges ? n_edges : 1u) * sizeof(uint32_t));
+        uint32_t *pred_cur = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
+        memcpy(pred_cur, pred_off, n_blocks * sizeof(uint32_t));
+        for (size_t b = 0; b < n_blocks; b++) {
+            for (uint32_t e = succ_off[b]; e < succ_off[b + 1]; e++) {
+                uint32_t s = succ_idx[e];
+                pred_idx[pred_cur[s]++] = (uint32_t)b;
+            }
+        }
+        free(pred_cur);
+
+        for (int pk = 0; pk < T->npool; pk++) reg_head[pk] = -1;
+        for (uint32_t vi = 0; vi < nv; vi++) {
+            int8_t pk = home_pk[vi];
+            if (pk >= 0 && last_use[vi] > first_pos[vi]) {
+                val_next[vi] = reg_head[pk];
+                reg_head[pk] = (int32_t)vi;
+            } else {
+                val_next[vi] = -1;
+            }
+        }
+
+        for (int pass = 0; pass < 2; pass++) {
+            bool any_rc = false;
+            for (size_t b = 0; b < n_blocks; b++) {
+                MLIR_BlockHandle bk = blk_h[b];
+                MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, bk);
+                if (term == MLIR_INVALID_HANDLE) continue;
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                for (size_t s = 0; s < ns; s++) {
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, s);
+                    if (nso == 0) continue;
+                    MLIR_BlockHandle succ = MLIR_GetOpSuccessor(ctx, term, s);
+                    for (size_t k = 0; k < nso; k++) {
+                        uint32_t vs, vd;
+                        if (!RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, term, s, k), &vs)) continue;
+                        if (!RA_VMAP_GET(MLIR_GetBlockArg(ctx, succ, k), &vd)) continue;
+                        if (vs == vd) continue;
+                        int8_t pks = home_pk[vs], pkd = home_pk[vd];
+                        if (pks < 0 || pkd < 0 || pks == pkd) continue;
+                        if (last_use[vs] <= first_pos[vs] || last_use[vd] <= first_pos[vd]) continue;
+
+                        // Case A: try recoloring block-arg `vd` to `pks`.
+                        uint32_t db = def_blk[vd];
+                        if (db > 0 && MLIR_GetValueDefiningOp(ctx, handle[vd]) == MLIR_INVALID_HANDLE &&
+                            !(crosses[vd] && pks < T->ncaller)) {
+                            memset(v_blks, 0, nb_w * sizeof(uint64_t));
+                            a64_bs_set(v_blks, db);
+                            uint32_t gd = glob_id[vd];
+                            if (gd != UINT32_MAX) {
+                                size_t gw = gd >> 6; uint64_t gbit = 1ull << (gd & 63u);
+                                for (size_t bb = 0; bb < n_blocks; bb++)
+                                    if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit))
+                                        a64_bs_set(v_blks, (uint32_t)bb);
+                            }
+                            bool ok = true;
+                            for (int32_t ui = reg_head[pks]; ui >= 0 && ok; ui = val_next[ui]) {
+                                uint32_t u = (uint32_t)ui;
+                                if (a64_bs_test(v_blks, def_blk[u])) { ok = false; break; }
+                                uint32_t gu = glob_id[u];
+                                if (gu != UINT32_MAX) {
+                                    size_t gw = gu >> 6; uint64_t gbit = 1ull << (gu & 63u);
+                                    for (size_t bb = 0; bb < n_blocks; bb++) {
+                                        if (!a64_bs_test(v_blks, (uint32_t)bb)) continue;
+                                        if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit)) {
+                                            ok = false; break;
+                                        }
+                                    }
+                                }
+                                if (!ok) break;
+                                // Check edge-copy safety on every predecessor of `db`:
+                                // `u` must not be passed to any other arg k' != k on pred -> db.
+                                for (uint32_t pe = pred_off[db]; pe < pred_off[db + 1] && ok; pe++) {
+                                    uint32_t pb = pred_idx[pe];
+                                    MLIR_OpHandle pterm = MLIR_GetBlockTerminator(ctx, blk_h[pb]);
+                                    if (pterm == MLIR_INVALID_HANDLE) continue;
+                                    size_t pns = MLIR_GetOpNumSuccessors(ctx, pterm);
+                                    for (size_t ps = 0; ps < pns && ok; ps++) {
+                                        if (MLIR_GetOpSuccessor(ctx, pterm, ps) != succ) continue;
+                                        size_t pnso = MLIR_GetOpNumSuccessorOperands(ctx, pterm, ps);
+                                        for (size_t pk2 = 0; pk2 < pnso; pk2++) {
+                                            if (pk2 == k) continue;
+                                            if (MLIR_GetOpSuccessorOperand(ctx, pterm, ps, pk2) == handle[u]) {
+                                                ok = false; break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (ok) {
+                                // Move `vd` from reg_head[pkd] to reg_head[pks].
+                                int32_t *pp = &reg_head[pkd];
+                                while (*pp >= 0 && *pp != (int32_t)vd) pp = &val_next[*pp];
+                                if (*pp == (int32_t)vd) *pp = val_next[vd];
+                                val_next[vd] = reg_head[pks];
+                                reg_head[pks] = (int32_t)vd;
+                                home_pk[vd] = pks;
+                                any_rc = true;
+                                continue;
+                            }
+                        }
+
+                        // Case B: try recoloring block-local op-defined `vs` to `pkd`.
+                        if (glob_id[vs] == UINT32_MAX && def_blk[vs] == (uint32_t)b &&
+                            !(crosses[vs] && pkd < T->ncaller)) {
+                            MLIR_OpHandle sdef = MLIR_GetValueDefiningOp(ctx, handle[vs]);
+                            if (sdef == MLIR_INVALID_HANDLE) continue;
+                            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                            size_t def_idx = no;
+                            for (size_t ii = 0; ii < no; ii++) {
+                                if (MLIR_GetBlockOp(ctx, bk, ii) == sdef) { def_idx = ii; break; }
+                            }
+                            if (def_idx >= no) continue;
+                            bool ok = true;
+                            for (int32_t ui = reg_head[pkd]; ui >= 0 && ok; ui = val_next[ui]) {
+                                uint32_t u = (uint32_t)ui;
+                                uint32_t gu = glob_id[u];
+                                bool in_b = (def_blk[u] == (uint32_t)b);
+                                bool out_b = false;
+                                if (gu != UINT32_MAX) {
+                                    size_t gw = gu >> 6; uint64_t gbit = 1ull << (gu & 63u);
+                                    if (live_in[b * bw_g + gw] & gbit) in_b = true;
+                                    if (live_out[b * bw_g + gw] & gbit) { in_b = true; out_b = true; }
+                                }
+                                if (!in_b) continue;
+                                if (out_b) { ok = false; break; }
+                                if (def_blk[u] == (uint32_t)b && def_pos[u] >= def_pos[vs]) { ok = false; break; }
+                                // Check if `u` is used by any op strictly after `def_idx` in `b`
+                                // or by any terminator successor operand of `b`.
+                                MLIR_ValueHandle uh = handle[u];
+                                for (size_t ii = def_idx + 1; ii < no && ok; ii++) {
+                                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, ii);
+                                    size_t nop = MLIR_GetOpNumOperands(ctx, op);
+                                    for (size_t oi = 0; oi < nop; oi++) {
+                                        MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, op, oi);
+                                        if (ov == uh) { ok = false; break; }
+                                        if (T->remat_skip) {
+                                            int32_t dmy = 0;
+                                            for (int hop = 0; hop < 4 && sm_get_fast(T->remat_skip, ov, &dmy); hop++) {
+                                                MLIR_OpHandle gd = MLIR_GetValueDefiningOp(ctx, ov);
+                                                if (gd != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, gd) == OP_TYPE_LLVM_GEP) {
+                                                    ov = MLIR_GetOpOperand(ctx, gd, 0);
+                                                    if (ov == uh) { ok = false; break; }
+                                                } else break;
+                                            }
+                                        }
+                                        if (!ok) break;
+                                    }
+                                }
+                                if (ok) {
+                                    for (size_t s2 = 0; s2 < ns && ok; s2++) {
+                                        size_t nso2 = MLIR_GetOpNumSuccessorOperands(ctx, term, s2);
+                                        for (size_t k2 = 0; k2 < nso2; k2++) {
+                                            if (MLIR_GetOpSuccessorOperand(ctx, term, s2, k2) == uh) {
+                                                ok = false; break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (ok) {
+                                int32_t *pp = &reg_head[pks];
+                                while (*pp >= 0 && *pp != (int32_t)vs) pp = &val_next[*pp];
+                                if (*pp == (int32_t)vs) *pp = val_next[vs];
+                                val_next[vs] = reg_head[pkd];
+                                reg_head[pkd] = (int32_t)vs;
+                                home_pk[vs] = pkd;
+                                any_rc = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!any_rc) break;
+        }
+        free(pred_idx); free(pred_off); free(val_next); free(reg_head); free(v_blks);
     }
 
     // --- 4a. Populate per-call live caller-saved register masks if any call-crossing
