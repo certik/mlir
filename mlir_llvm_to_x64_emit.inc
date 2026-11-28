@@ -1445,8 +1445,30 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 // (e.g. `p - 1`) would scale as 0xFFFFFFFF*stride; sign-extend
                 // narrow indices first.
                 if (ib == 32 || ib == 16 || (ib && ib < 16)) {
-                    int bits = (ib == 32) ? 32 : (ib == 16) ? 16 : 8;
-                    x64_emit1(F, OP_TYPE_X64_MOVSX, (int64_t)RCX | ((int64_t)RCX << 4) | ((int64_t)bits << 8));
+                    bool known_nonneg_i32 = false;
+                    if (ib == 32) {
+                        MLIR_OpHandle id = MLIR_GetValueDefiningOp(ctx, idx_v);
+                        if (id != MLIR_INVALID_HANDLE) {
+                            MLIR_OpType idt = MLIR_GetOpType(ctx, id);
+                            int64_t c = 0;
+                            if (idt == OP_TYPE_LLVM_AND &&
+                                is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, id, 1)), &c) &&
+                                c >= 0 && c <= 0x7fffffffll) {
+                                known_nonneg_i32 = true;
+                            } else if (idt == OP_TYPE_LLVM_LSHR &&
+                                       is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, id, 1)), &c) &&
+                                       c >= 1 && c < 32) {
+                                known_nonneg_i32 = true;
+                            } else if (idt == OP_TYPE_LLVM_ZEXT &&
+                                       int_bits(ctx, MLIR_GetOpOperand(ctx, id, 0)) < 32) {
+                                known_nonneg_i32 = true;
+                            }
+                        }
+                    }
+                    if (!known_nonneg_i32) {
+                        int bits = (ib == 32) ? 32 : (ib == 16) ? 16 : 8;
+                        x64_emit1(F, OP_TYPE_X64_MOVSX, (int64_t)RCX | ((int64_t)RCX << 4) | ((int64_t)bits << 8));
+                    }
                 }
                 if (stride > 1 && (stride & (stride - 1)) == 0) {
                     int sh = 0;
