@@ -2479,6 +2479,19 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                     bool k1 = cf_get_int_const(ctx, a1, &c1, &w1);
                     uint32_t rw = MLIR_GetTypeWidth(ctx, rty);
 
+                    // Canonicalize commutative integer binops so constants are on the RHS.
+                    if (k0 && !k1 &&
+                        (ot == OP_TYPE_LLVM_ADD || ot == OP_TYPE_LLVM_MUL ||
+                         ot == OP_TYPE_LLVM_AND || ot == OP_TYPE_LLVM_OR || ot == OP_TYPE_LLVM_XOR)) {
+                        MLIR_SetOpOperand(ctx, op, 0, a1);
+                        MLIR_SetOpOperand(ctx, op, 1, a0);
+                        MLIR_ValueHandle tv = a0; a0 = a1; a1 = tv;
+                        int64_t tc = c0; c0 = c1; c1 = tc;
+                        uint32_t tw = w0; w0 = w1; w1 = tw;
+                        k0 = false; k1 = true;
+                        changed = true;
+                    }
+
                     if (ot == OP_TYPE_LLVM_ICMP && k0 && k1) {
                         MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
                         int64_t pred = pa ? MLIR_GetAttributeInteger(ctx, pa) : 0;
