@@ -1950,6 +1950,19 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                     i++; continue;
                 }
 
+                // Post-increment `gep(p, const) ; load(p)` -> `load(p) ; gep(p, const)`
+                // so `p` dies at the gep and can coalesce with `p_next` (e.g. `*(pc++)`).
+                if (ot == OP_TYPE_LLVM_GEP && i + 1 < MLIR_GetBlockNumOps(ctx, bk)) {
+                    MLIR_OpHandle nxt = MLIR_GetBlockOp(ctx, bk, i + 1);
+                    if (MLIR_GetOpType(ctx, nxt) == OP_TYPE_LLVM_LOAD &&
+                        MLIR_GetOpOperand(ctx, nxt, 0) == MLIR_GetOpOperand(ctx, op, 0)) {
+                        MLIR_DetachOp(ctx, nxt);
+                        MLIR_InsertBlockOpAtIndex(ctx, bk, nxt, i);
+                        i += 2;
+                        continue;
+                    }
+                }
+
                 // Select folding
                 if (ot == OP_TYPE_LLVM_SELECT) {
                     MLIR_ValueHandle vc = MLIR_GetOpOperand(ctx, op, 0);

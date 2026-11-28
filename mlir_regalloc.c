@@ -666,7 +666,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     // --- 1. Linearise + number values + record def_blk / block_vrange / calls. ---
     size_t nv_alloc = nv_max ? nv_max : 1;
     size_t main_need =
-        n_blocks * (sizeof(uint32_t) * 5 + 8) +
+        n_blocks * (sizeof(uint32_t) * 6 + 8) +
         (n_blocks + 1) * (sizeof(uint32_t) * 3 + sizeof(int64_t) + 8) +
         nv_alloc * (sizeof(MLIR_ValueHandle) + sizeof(uint32_t) * 12 +
                     sizeof(uint64_t) + sizeof(uint8_t) * 2 + sizeof(int32_t) + 8) +
@@ -800,6 +800,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint32_t *succ_off = NULL;
     uint32_t *succ_idx = NULL;
     uint32_t *loop_depth = NULL;
+    uint32_t *hdr_in = NULL;
     bool has_backedge = false;
     if (n_blocks > 1) {
         succ_off = (uint32_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(uint32_t));
@@ -808,6 +809,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         succ_cap = g_ra_succ_pool.cap / sizeof(uint32_t);
         loop_depth = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
         memset(loop_depth, 0, n_blocks * sizeof(uint32_t));
+        hdr_in = (uint32_t *)ra_bump(mbuf, &moff, n_blocks * sizeof(uint32_t));
+        memset(hdr_in, 0, n_blocks * sizeof(uint32_t));
         int64_t *delta = (int64_t *)ra_bump(mbuf, &moff, (n_blocks + 1) * sizeof(int64_t));
         memset(delta, 0, (n_blocks + 1) * sizeof(int64_t));
         // Track the furthest backedge source per loop header so a switch-dispatch
@@ -839,6 +842,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     succ_idx[sc++] = ti;
                     if (ti <= (uint32_t)b) {
                         has_backedge = true;
+                        if (hdr_in[ti] < 16u) hdr_in[ti]++;
                         if ((int32_t)b > hdr_max_b[ti]) hdr_max_b[ti] = (int32_t)b;
                     }
                 }
@@ -971,6 +975,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_BlockHandle bk = blk_h[b];
             uint32_t op_pos = block_first[b];
             uint64_t w = loop_depth ? A64_USE_WEIGHT_AT(loop_depth[b]) : 1ull;
+            if (hdr_in && hdr_in[b] > 1u) w *= (uint64_t)hdr_in[b];
             size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
                 MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
