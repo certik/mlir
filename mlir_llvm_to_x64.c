@@ -277,6 +277,14 @@ typedef struct {
 } X64JTab;
 
 typedef struct {
+    int              pad_lbl;
+    MLIR_OpHandle    term_op;
+    size_t           succ_idx;
+    MLIR_BlockHandle tgt_blk;
+    int              tgt_lbl;
+} X64ColdPad;
+
+typedef struct {
     MLIR_Context *ctx;
     ObjFunc      *f;
     VMap          slots;     // value -> rbp-relative byte offset (positive = below rbp)
@@ -318,6 +326,7 @@ typedef struct {
     // intra-function branch fixups (used by x64_encode_block)
     BrFix        *fix; size_t n_fix, c_fix;
     X64JTab      *jtabs; size_t n_jtabs, c_jtabs;
+    X64ColdPad   *cold_pads; size_t n_cold_pads, c_cold_pads;
     uint32_t      n_fixed;   // # of fixed (named) params, for llvm.intr.vastart
     bool          ok;
     // x64.* MLIR dialect lowering state: non-NULL during llvm.* -> x64.* isel,
