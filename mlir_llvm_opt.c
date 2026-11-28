@@ -823,6 +823,7 @@ typedef struct {
     bool has_alloca;
     bool only_devirt; // larger callee with indirect call: inline only if call passes addressof!
     bool is_fast_ret; // larger callee with fast-path early return: defer to later rounds so small wrappers inline first!
+    bool has_loop;    // callee contains a back-edge (loop): defer & avoid bloating looping callers!
 } InlCand;
 
 static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *out) {
@@ -844,11 +845,23 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     bool has_alloca = false;
     bool has_call = false;
     bool has_indirect_call = false;
+    bool has_loop = false;
+    MLIR_BlockHandle blk_arr[32];
+    for (size_t b = 0; b < nb; b++) blk_arr[b] = MLIR_GetRegionBlock(ctx, reg, b);
     for (size_t b = 0; b < nb; b++) {
-        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        MLIR_BlockHandle bk = blk_arr[b];
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         total_ops += no;
         if (total_ops > 180) return false;
+        if (no > 0 && !has_loop) {
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+            for (size_t si = 0; si < ns && !has_loop; si++) {
+                MLIR_BlockHandle sb = MLIR_GetOpSuccessor(ctx, term, si);
+                for (size_t pb = 0; pb <= b; pb++)
+                    if (blk_arr[pb] == sb) { has_loop = true; break; }
+            }
+        }
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return false;
@@ -915,6 +928,7 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     out->has_alloca = has_alloca;
     out->only_devirt = only_devirt;
     out->is_fast_ret = is_fast_ret;
+    out->has_loop = has_loop;
     return true;
 }
 
@@ -1216,8 +1230,22 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module) {
             if (cnb == 0) continue;
             string caller_name = opt_attr_str(ctx, caller, MLIR_KEY_SYM_NAME);
             size_t caller_ops = 0;
-            for (size_t b = 0; b < cnb; b++)
-                caller_ops += MLIR_GetBlockNumOps(ctx, MLIR_GetRegionBlock(ctx, creg, b));
+            bool caller_has_loop = false;
+            for (size_t b = 0; b < cnb; b++) {
+                MLIR_BlockHandle cbk = MLIR_GetRegionBlock(ctx, creg, b);
+                size_t cno = MLIR_GetBlockNumOps(ctx, cbk);
+                caller_ops += cno;
+                if (cno > 0 && !caller_has_loop && cnb <= 128) {
+                    MLIR_OpHandle ct = MLIR_GetBlockOp(ctx, cbk, cno - 1);
+                    size_t cns = MLIR_GetOpNumSuccessors(ctx, ct);
+                    for (size_t si = 0; si < cns && !caller_has_loop; si++) {
+                        MLIR_BlockHandle sb = MLIR_GetOpSuccessor(ctx, ct, si);
+                        for (size_t pb = 0; pb <= b; pb++)
+                            if (MLIR_GetRegionBlock(ctx, creg, pb) == sb) { caller_has_loop = true; break; }
+                    }
+                }
+            }
+            if (cnb > 128) caller_has_loop = true;
             bool is_large_caller = (caller_ops > 2000);
             if (caller_ops > 8000) continue;
             size_t caller_lim = is_large_caller ? 12000 : 2000;
@@ -1243,7 +1271,9 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module) {
                         j = (j + 1) & hmask;
                     }
                     if (!found) continue;
-                    if (round < 2 && !found->only_devirt && (found->is_fast_ret || found->n_ops > 30)) continue;
+                    if (round < 2 && !found->only_devirt && (found->is_fast_ret || found->has_loop || found->n_ops > 30)) continue;
+                    if (round == 2 && !found->only_devirt && found->has_loop) continue;
+                    if (found->has_loop && !found->only_devirt && caller_has_loop && found->n_ops > 20) continue;
                     if (is_large_caller && (found->n_ops > 180 || found->n_blocks > 24)) continue;
                     if (found->only_devirt) {
                         bool passes_fnptr = false;
@@ -2576,6 +2606,41 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                             MLIR_ValueHandle bv = cf_unwrap_bool_i1(ctx, a0);
                             if (bv != MLIR_INVALID_HANDLE) repl = bv;
                         }
+                        // Bit-test folding: icmp eq/ne (and (ashr/lshr x, K), M), 0
+                        // -> icmp eq/ne (and x, M << K), 0 (turns `sar; and; test` into `test $imm`!).
+                        if (repl == MLIR_INVALID_HANDLE && (pred == 0 || pred == 1) && c1 == 0) {
+                            MLIR_OpHandle d_and = MLIR_GetValueDefiningOp(ctx, a0);
+                            if (d_and != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, d_and) == OP_TYPE_LLVM_AND) {
+                                int64_t m_c = 0; uint32_t mw = 0;
+                                if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d_and, 1), &m_c, &mw) &&
+                                    (mw == 32 || mw == 64) && m_c > 0 && m_c <= 0xffff) {
+                                    MLIR_OpHandle d_sh = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, d_and, 0));
+                                    if (d_sh != MLIR_INVALID_HANDLE &&
+                                        (MLIR_GetOpType(ctx, d_sh) == OP_TYPE_LLVM_ASHR ||
+                                         MLIR_GetOpType(ctx, d_sh) == OP_TYPE_LLVM_LSHR)) {
+                                        int64_t k_c = 0;
+                                        if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d_sh, 1), &k_c, NULL) &&
+                                            k_c > 0 && k_c < 31 && ((uint64_t)m_c << (uint64_t)k_c) <= 0x7fffffffull) {
+                                            MLIR_ValueHandle x_v = MLIR_GetOpOperand(ctx, d_sh, 0);
+                                            MLIR_TypeHandle x_ty = MLIR_GetValueType(ctx, x_v);
+                                            int64_t new_m = (int64_t)((uint64_t)m_c << (uint64_t)k_c);
+                                            MLIR_ValueHandle mc_v = cf_make_int_const(ctx, bk, i, x_ty, new_m);
+                                            MLIR_ValueHandle aops[2] = { x_v, mc_v };
+                                            MLIR_OpSpec asp; memset(&asp, 0, sizeof(asp));
+                                            asp.type = OP_TYPE_LLVM_AND;
+                                            asp.operands = aops; asp.n_operands = 2;
+                                            asp.result_types = &x_ty; asp.n_results = 1;
+                                            MLIR_OpHandle new_and = MLIR_CreateOpFromSpec(ctx, &asp);
+                                            MLIR_InsertBlockOpAtIndex(ctx, bk, new_and, i + 1);
+                                            MLIR_SetOpOperand(ctx, op, 0, MLIR_GetOpResult(ctx, new_and, 0));
+                                            i += 3;
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Range-check folding:
@@ -3210,11 +3275,10 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                 }
             }
         }
-        if (factor == 0 && !masked_iv && n_body <= 18 && hna <= 4) {
+        if (factor == 0 && !masked_iv && n_body <= 20 && hna <= 4) {
             bool ok_rt = false;
             if ((pred == 2 || pred == 6) && has_const_init && init_c == 0 &&
-                has_const_step && step_c == 1 && iv_w >= 32 &&
-                MLIR_GetOpNumSuccessorOperands(ctx, hterm, 1) == 0) {
+                has_const_step && step_c == 1 && iv_w >= 32) {
                 ok_rt = true;
             } else if (pred == 3 && iv_w == 64 && has_const_lim && lim_c > 0 && lim_c <= 0x3fffffffll &&
                        n_body <= 6 && hna == 1) {
@@ -3262,7 +3326,8 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             if (ok_rt) {
                 MLIR_OpHandle ldef = MLIR_GetValueDefiningOp(ctx, lim_v);
                 MLIR_BlockHandle lblk_def = (ldef != MLIR_INVALID_HANDLE) ? MLIR_GetOpParentBlock(ctx, ldef) : MLIR_INVALID_HANDLE;
-                bool lim_ok = has_const_lim || (lblk_def != hblk && lblk_def != bblk && lblk_def != lblk);
+                bool lim_ok = has_const_lim || (ldef == MLIR_INVALID_HANDLE) ||
+                              (lblk_def != hblk && lblk_def != bblk && lblk_def != lblk);
                 if (lim_ok) {
                     for (size_t a = 0; a < hna; a++)
                         if (MLIR_GetBlockArg(ctx, hblk, a) == lim_v) { lim_ok = false; break; }

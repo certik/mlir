@@ -1537,7 +1537,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         if (!is_dispatch_loop && has_cold_loop_call && n_calls_tot <= 24u && n_blocks >= 8u)
             is_dispatch_loop = true;
-        size_t call_blk_lim = (max_hdr_in >= 32u) ? (n_blocks / 2u) : (n_blocks / 4u);
+        size_t call_blk_lim = (max_hdr_in >= 32u || (has_cold_loop_call && n_calls_tot <= 24u)) ? (n_blocks / 2u) : (n_blocks / 4u);
         if (n_call_blks > call_blk_lim) is_dispatch_loop = false;
     }
 
@@ -1619,26 +1619,34 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     span_ok = true;
             }
             if (span_ok) {
-                for (size_t a = 0; a < nact; a++) {
-                    uint8_t pk = act_pk[a];
-                    if (callee_only && pk < T->ncaller) continue;
-                    if (hole_busy_mask & (1u << pk)) continue;
-                    uint32_t gv = act_vi[a];
-                    uint32_t g = glob_id[gv];
-                    if (g == UINT32_MAX) continue;
-                    if (def_blk[gv] >= b0 && def_blk[gv] <= b1) continue;
-                    bool dead_all = true;
-                    for (uint32_t bb = b0; bb <= b1; bb++) {
-                        if (a64_bs_test(live_in + (size_t)bb * bw_g, g) ||
-                            a64_bs_test(live_out + (size_t)bb * bw_g, g)) {
-                            dead_all = false; break;
-                        }
+                for (int pass = 0; pass < 2 && home_pk[vi] < 0; pass++) {
+                    if (pass == 1) {
+                        if (!(callee_only && is_dispatch_loop && T->call_save_mask && !env->linear_crosses &&
+                              caller_mask && weight[vi] > call_cross_w[vi] / 16ull))
+                            break;
                     }
-                    if (!dead_all) continue;
-                    hole_busy_mask |= (1u << pk);
-                    hole_end[nhole] = lu; hole_pk[nhole] = pk; nhole++;
-                    home_pk[vi] = (int8_t)pk;
-                    break;
+                    for (size_t a = 0; a < nact; a++) {
+                        uint8_t pk = act_pk[a];
+                        if (pass == 0 && callee_only && pk < T->ncaller) continue;
+                        if (pass == 1 && pk >= T->ncaller) continue;
+                        if (hole_busy_mask & (1u << pk)) continue;
+                        uint32_t gv = act_vi[a];
+                        uint32_t g = glob_id[gv];
+                        if (g == UINT32_MAX) continue;
+                        if (def_blk[gv] >= b0 && def_blk[gv] <= b1) continue;
+                        bool dead_all = true;
+                        for (uint32_t bb = b0; bb <= b1; bb++) {
+                            if (a64_bs_test(live_in + (size_t)bb * bw_g, g) ||
+                                a64_bs_test(live_out + (size_t)bb * bw_g, g)) {
+                                dead_all = false; break;
+                            }
+                        }
+                        if (!dead_all) continue;
+                        hole_busy_mask |= (1u << pk);
+                        hole_end[nhole] = lu; hole_pk[nhole] = pk; nhole++;
+                        home_pk[vi] = (int8_t)pk;
+                        break;
+                    }
                 }
             }
         }

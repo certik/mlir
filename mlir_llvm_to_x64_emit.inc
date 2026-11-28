@@ -2314,25 +2314,12 @@ static size_t g_x64_n_lbl = 0;
 static bool x64_reg_dead_after(MLIR_Context *ctx, MLIR_BlockHandle blk,
                                size_t start, size_t n_ops, uint8_t reg) {
     uint16_t bit = (uint16_t)(1u << reg);
-    bool is_scratch = (reg == RAX || reg == RCX || reg == R11);
     int seen = 0;
     for (size_t k = start; k < n_ops && seen < 24; k++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, k);
         MLIR_OpType ty = MLIR_GetOpType(ctx, op);
         if (ty == OP_TYPE_X64_NOP) continue;
         seen++;
-        // Scratch regs (RAX/RCX/R11) are never live across taken block boundaries
-        // (JMP/LABEL). For JCC, only return true if the fallthrough op is not
-        // JTAB_DISPATCH (which reads RAX!).
-        if (is_scratch && (ty == OP_TYPE_X64_JMP || ty == OP_TYPE_X64_LABEL))
-            return true;
-        if (is_scratch && ty == OP_TYPE_X64_JCC) {
-            size_t nxt = k + 1;
-            while (nxt < n_ops && MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, nxt)) == OP_TYPE_X64_NOP) nxt++;
-            if (nxt >= n_ops || MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, nxt)) != OP_TYPE_X64_JTAB_DISPATCH)
-                return true;
-            continue;
-        }
         if (ty == OP_TYPE_X64_JTAB_DISPATCH)
             return reg == RCX;
         if (g_x64_lbl_live_in) {
@@ -2716,7 +2703,7 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                         int wk = (int)((vk >> 8) & 1);
                         int32_t offk = (int32_t)(uint32_t)(vk >> 32);
                         if (offk == off0 && (wk == w0 || (w0 == 1 && wk == 0))) {
-                            if (rk == r0 && wk == w0) {
+                            if (rk == r0 && wk == 1 && w0 == 1) {
                                 MLIR_RewriteVoidInlineI64(ctx, opk, OP_TYPE_X64_NOP, 0);
                             } else {
                                 uint64_t nv = (uint64_t)rk | ((uint64_t)r0 << 4) | ((uint64_t)wk << 8);
@@ -5454,11 +5441,108 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         }
     }
 
+    // Cold-block sinking at -O2: sink non-entry blocks that unconditionally lead
+    // to a function call or unreachable to the end of the function so hot
+    // call-free fast paths (e.g. CoreMark calc_func, Lua/SQLite dispatch ops)
+    // fall through linearly without jumping over cold slow-path code.
+    size_t *blk_order = NULL;
+    if (g_x64_opt_level >= 2 && !F.fast_ra && nb >= 4 && jbh_k && jbh_v) {
+        uint8_t *is_cold = (uint8_t *)calloc(nb, 1);
+        blk_order = (size_t *)malloc(nb * sizeof(size_t));
+        if (is_cold && blk_order) {
+            bool any_cold = false;
+            for (size_t b = 1; b < nb; b++) {
+                MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                for (size_t oi = 0; oi < no; oi++) {
+                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, oi);
+                    MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+                    if (ot == OP_TYPE_LLVM_UNREACHABLE) { is_cold[b] = 1; any_cold = true; break; }
+                    if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL) {
+                        string cn = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE));
+                        if (!cn.size) cn = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
+                        bool is_intr = (str_eqz(cn, "memcpy") || str_eqz(cn, "base_memcpy") ||
+                                        str_eqz(cn, "memset") || str_eqz(cn, "base_memset") ||
+                                        str_eqz(cn, "memcmp") || str_eqz(cn, "base_memcmp") ||
+                                        str_eqz(cn, "strcmp") || str_eqz(cn, "base_strcmp") ||
+                                        str_eqz(cn, "strlen") || str_eqz(cn, "base_strlen"));
+                        if (!is_intr) { is_cold[b] = 1; any_cold = true; break; }
+                    }
+                }
+            }
+            if (any_cold) {
+                for (int pass = 0; pass < 4; pass++) {
+                    bool ch = false;
+                    for (size_t b = nb - 1; b >= 1; b--) {
+                        if (is_cold[b]) continue;
+                        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                        if (no == 0) continue;
+                        MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                        if (ns == 0) continue;
+                        bool all_fwd_cold = true;
+                        for (size_t si = 0; si < ns; si++) {
+                            uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, si);
+                            size_t s = (sk * 1099511628211ull) & jbh_mask;
+                            int32_t ti = -1;
+                            while (jbh_k[s]) {
+                                if (jbh_k[s] == sk) { ti = jbh_v[s]; break; }
+                                s = (s + 1) & jbh_mask;
+                            }
+                            if (ti <= (int32_t)b || !is_cold[ti]) { all_fwd_cold = false; break; }
+                        }
+                        if (all_fwd_cold) { is_cold[b] = 1; ch = true; }
+                    }
+                    // Forward propagation: if a non-entry block has >=1 predecessors
+                    // and ALL its predecessors are cold, it is also cold (e.g. post-call
+                    // epilogue blocks of an inlined cold slow path).
+                    uint8_t *has_hot_pred = (uint8_t *)calloc(nb, 1);
+                    if (has_hot_pred) {
+                        for (size_t b = 0; b < nb; b++) {
+                            if (is_cold[b]) continue;
+                            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                            if (no == 0) continue;
+                            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                            for (size_t si = 0; si < ns; si++) {
+                                uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, si);
+                                size_t s = (sk * 1099511628211ull) & jbh_mask;
+                                while (jbh_k[s]) {
+                                    if (jbh_k[s] == sk) { has_hot_pred[jbh_v[s]] = 1; break; }
+                                    s = (s + 1) & jbh_mask;
+                                }
+                            }
+                        }
+                        for (size_t b = 1; b < nb; b++) {
+                            if (!is_cold[b] && pred_cnt[b] > 0 && !has_hot_pred[b]) {
+                                is_cold[b] = 1; ch = true;
+                            }
+                        }
+                        free(has_hot_pred);
+                    }
+                    if (!ch) break;
+                }
+                size_t p = 0;
+                for (size_t b = 0; b < nb; b++) if (!is_cold[b]) blk_order[p++] = b;
+                for (size_t b = 0; b < nb; b++) if (is_cold[b])  blk_order[p++] = b;
+            } else {
+                free(blk_order); blk_order = NULL;
+            }
+        } else {
+            free(blk_order); blk_order = NULL;
+        }
+        free(is_cold);
+    }
+
     // --- emit blocks ---
-    for (size_t b = 0; b < nb && F.ok; b++) {
+    for (size_t ord = 0; ord < nb && F.ok; ord++) {
+        size_t b = blk_order ? blk_order[ord] : ord;
         if (skip_blk && skip_blk[b]) continue;
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
-        MLIR_BlockHandle next_bk = (b + 1 < nb) ? MLIR_GetRegionBlock(ctx, reg, b + 1) : MLIR_INVALID_HANDLE;
+        size_t next_b = (ord + 1 < nb) ? (blk_order ? blk_order[ord + 1] : (ord + 1)) : nb;
+        MLIR_BlockHandle next_bk = (next_b < nb) ? MLIR_GetRegionBlock(ctx, reg, next_b) : MLIR_INVALID_HANDLE;
         x64_emit1(&F, OP_TYPE_X64_LABEL, (int64_t)b);
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         // Check for fusable `icmp [-> select(1,0) -> icmp ne/eq 0] -> cond_br` at block tail,
@@ -5937,7 +6021,7 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             }
         }
     }
-    free(jbh_k); free(jbh_v); free(pred_cnt); free(skip_blk);
+    free(jbh_k); free(jbh_v); free(pred_cnt); free(skip_blk); free(blk_order);
 
     if (early_ret_lbl >= 0) {
         x64_emit1(&F, OP_TYPE_X64_LABEL, (int64_t)early_ret_lbl);
