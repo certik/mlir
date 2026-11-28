@@ -271,7 +271,7 @@ static void load_rbp_xmm(FnCtx *F, uint8_t xd, int32_t off, int is_ss) {
                   (int64_t)xd | ((int64_t)(is_ss ? 1 : 0) << 4) | ((int64_t)(uint32_t)off << 32));
         return;
     }
-    eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xd, 0, RBP); eb(F, 0x0F); eb(F, 0x10); modrm_mem_disp(F, xd, RBP, -off);
+    eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xd, 0, 0); eb(F, 0x0F); eb(F, 0x10); emit_frame_modrm(F, xd, off);
 }
 static void store_rbp_xmm(FnCtx *F, int32_t off, uint8_t xs, int is_ss) {
     if (F->x64_blk) {
@@ -279,7 +279,7 @@ static void store_rbp_xmm(FnCtx *F, int32_t off, uint8_t xs, int is_ss) {
                   (int64_t)xs | ((int64_t)(is_ss ? 1 : 0) << 4) | ((int64_t)(uint32_t)off << 32));
         return;
     }
-    eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xs, 0, RBP); eb(F, 0x0F); eb(F, 0x11); modrm_mem_disp(F, xs, RBP, -off);
+    eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xs, 0, 0); eb(F, 0x0F); eb(F, 0x11); emit_frame_modrm(F, xs, off);
 }
 static void load_mem_xmm(FnCtx *F, uint8_t xd, uint8_t addr, int is_ss) {
     if (F->x64_blk) {
@@ -763,12 +763,19 @@ static void emit_edge(FnCtx *F, MLIR_OpHandle term, size_t si, MLIR_BlockHandle 
     }
 }
 
-// Restore callee-saved registers, then `leave ; ret` (or `pop ; ret` when omit_fp).
+// Restore callee-saved registers, then `leave ; ret` (or `add rsp`/`pop ; ret` when omit_fp/use_rsp_frame).
 static void emit_epilogue(FnCtx *F) {
     if (F->omit_fp) {
         if (F->fp_pad) x64_emit1(F, OP_TYPE_X64_ADD_RSP, 8);
         for (int j = F->n_cs - 1; j >= 0; j--)
             x64_emit1(F, OP_TYPE_X64_POP_R, F->cs_reg[j]);
+        x64_emit0(F, OP_TYPE_X64_RET);
+        return;
+    }
+    if (F->use_rsp_frame) {
+        for (int j = F->n_cs - 1; j >= 0; j--)
+            load_rbp(F, F->cs_reg[j], F->cs_base + 8 * (j + 1), 1);
+        if (F->frame) x64_emit1(F, OP_TYPE_X64_ADD_RSP, (int64_t)F->frame);
         x64_emit0(F, OP_TYPE_X64_RET);
         return;
     }
@@ -1098,7 +1105,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             return;
         }
         uint8_t rt = val_reg_or_load(F, vt, RCX, w);
-        uint8_t rc = val_reg_or_load(F, vc, RDX, 0);
+        uint8_t rc = val_reg_or_load(F, vc, R11, 0);
         uint8_t dst = (has_rD && rD != rt && rD != rc) ? rD : RAX;
         load_val_w(F, vf, dst, w);
         alu_rr(F, 0x85, rc, rc, 0);                   // test rc, rc
@@ -1192,7 +1199,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             }
             return;
         }
-        uint8_t rv = val_reg_or_load(F, val, RDX, nb > 4 ? 1 : 0);
+        uint8_t rv = val_reg_or_load(F, val, R11, nb > 4 ? 1 : 0);
         int32_t aoff;
         if (alloca_slot(F, addr, &aoff)) {
             store_rbp_sized(F, aoff, rv, nb);
@@ -1825,7 +1832,7 @@ static bool x64_op_regs(MLIR_Context *ctx, MLIR_OpHandle op,
 static bool x64_reg_dead_after(MLIR_Context *ctx, MLIR_BlockHandle blk,
                                size_t start, size_t n_ops, uint8_t reg) {
     uint16_t bit = (uint16_t)(1u << reg);
-    bool is_scratch = (reg == RAX || reg == RCX || reg == RDX || reg == R11);
+    bool is_scratch = (reg == RAX || reg == RCX || reg == R11);
     int seen = 0;
     for (size_t k = start; k < n_ops && seen < 24; k++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, k);
@@ -2059,8 +2066,8 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                     }
                 }
                 // mov t, RAX (64b); mov_ri32 RAX, imm; store_mem [t], RAX (t dead) ->
-                // mov_ri32 RDX, imm; store_mem [RAX], RDX (unlocks store_mem_sib!)
-                if (w0 == 1 && s0 == RAX && d0 != RAX && d0 != RDX && t1 == OP_TYPE_X64_MOV_RI32) {
+                // mov_ri32 R11, imm; store_mem [RAX], R11 (unlocks store_mem_sib!)
+                if (w0 == 1 && s0 == RAX && d0 != RAX && d0 != R11 && t1 == OP_TYPE_X64_MOV_RI32) {
                     uint64_t v1 = (uint64_t)MLIR_GetOpInlineI64(ctx, op1);
                     uint8_t r1 = (uint8_t)(v1 & 15);
                     size_t k = x64_next_live(ctx, blk, j + 1, n_ops);
@@ -2072,12 +2079,12 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                             if (addr == d0 && val == RAX &&
                                 x64_reg_dead_after(ctx, blk, k + 1, n_ops, d0) &&
                                 x64_reg_dead_after(ctx, blk, k + 1, n_ops, RAX) &&
-                                x64_reg_dead_after(ctx, blk, k + 1, n_ops, RDX)) {
+                                x64_reg_dead_after(ctx, blk, k + 1, n_ops, R11)) {
                                 MLIR_RewriteVoidInlineI64(ctx, op0, OP_TYPE_X64_NOP, 0);
                                 MLIR_RewriteVoidInlineI64(ctx, op1, OP_TYPE_X64_MOV_RI32,
-                                    (int64_t)((v1 & ~(uint64_t)15u) | (uint64_t)RDX));
+                                    (int64_t)((v1 & ~(uint64_t)15u) | (uint64_t)R11));
                                 MLIR_RewriteVoidInlineI64(ctx, op2, OP_TYPE_X64_STORE_MEM,
-                                    (int64_t)((v2 & ~(uint64_t)0xffu) | (uint64_t)RAX | ((uint64_t)RDX << 4)));
+                                    (int64_t)((v2 & ~(uint64_t)0xffu) | (uint64_t)RAX | ((uint64_t)R11 << 4)));
                                 changed = true;
                                 continue;
                             }
@@ -3039,10 +3046,10 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             eb(F, 0x48); eb(F, 0x8D); eb(F, 0x0D);
             uint32_t fld = here(F); e32(F, 0);
             if (jid < F->n_jtabs) F->jtabs[jid].lea_disp_off = fld;
-            // movsxd rdx, DWORD PTR [rcx + rax*4]
-            eb(F, 0x48); eb(F, 0x63); eb(F, 0x14); eb(F, 0x81);
-            // add rcx, rdx
-            eb(F, 0x48); eb(F, 0x01); eb(F, 0xD1);
+            // movsxd rax, DWORD PTR [rcx + rax*4]
+            eb(F, 0x48); eb(F, 0x63); eb(F, 0x04); eb(F, 0x81);
+            // add rcx, rax
+            eb(F, 0x48); eb(F, 0x01); eb(F, 0xC1);
             // jmp rcx
             eb(F, 0xFF); eb(F, 0xE1);
             break;
@@ -3476,9 +3483,56 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         else                                     x64_ra_mode = 1;
     }
     uint64_t t_ra = x64_clock();
+    // Pre-scan function to see if RDX (6th caller-saved reg) and RBP (6th callee-saved
+    // reg via RSP-relative frame addressing) can safely join the allocatable pool.
+    bool fn_can_rsp_frame = (g_x64_opt_level >= 1 && !F.wasm_lifted);
+    bool fn_can_rdx       = (g_x64_opt_level >= 1 && !F.wasm_lifted);
+    bool fn_has_call      = false;
+    bool fn_has_vastart   = false;
+    if (fn_can_rsp_frame || fn_can_rdx) {
+        if (nb > 0 && MLIR_GetBlockNumArgs(ctx, MLIR_GetRegionBlock(ctx, reg, 0)) > 6)
+            fn_can_rsp_frame = false;
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+                if (ot == OP_TYPE_LLVM_INTR_VASTART) { fn_has_vastart = true; fn_can_rsp_frame = false; }
+                else if (ot == OP_TYPE_LLVM_SDIV || ot == OP_TYPE_LLVM_UDIV ||
+                         ot == OP_TYPE_LLVM_SREM || ot == OP_TYPE_LLVM_UREM ||
+                         ot == OP_TYPE_LLVM_FPTOUI || ot == OP_TYPE_LLVM_UITOFP) {
+                    fn_can_rdx = false;
+                } else if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL) {
+                    fn_has_call = true;
+                    string cn = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE));
+                    if (!cn.size) cn = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
+                    size_t nargs = MLIR_GetOpNumOperands(ctx, op) - (cn.size == 0 ? 1 : 0);
+                    if (nargs > 6 || str_eqz(cn, "__tinyc_syscall6") ||
+                        MLIR_GetOpAttr(ctx, op, MLIR_KEY_VAR_CALLEE_TYPE) != MLIR_INVALID_HANDLE)
+                        fn_can_rsp_frame = false;
+                }
+            }
+        }
+    }
     if (x64_ra_mode != 3) {
         RegTarget T = x64_regtarget();
         bool use_fast = (x64_ra_mode == 1 && g_x64_opt_level == 0 && !F.wasm_lifted);
+        if (use_fast) { fn_can_rsp_frame = false; fn_can_rdx = false; }
+        if (!use_fast && (fn_can_rdx || fn_can_rsp_frame)) {
+            // Rebuild pool: caller-saved [R10, R8, R9, RSI, RDI, (RDX)],
+            // callee-saved [RBX, R12, R13, R14, R15, (RBP)].
+            int nc = 0, np = 0;
+            T.pool[np++] = R10; T.pool[np++] = R8; T.pool[np++] = R9;
+            T.pool[np++] = RSI; T.pool[np++] = RDI;
+            if (fn_can_rdx) T.pool[np++] = RDX;
+            nc = np;
+            T.pool[np++] = RBX; T.pool[np++] = R12; T.pool[np++] = R13;
+            T.pool[np++] = R14; T.pool[np++] = R15;
+            if (fn_can_rsp_frame) T.pool[np++] = RBP;
+            T.ncaller = nc;
+            T.npool = np;
+        }
         uint32_t um = use_fast
             ? mlir_regalloc_fast(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T)
             : mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
@@ -3657,23 +3711,11 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         F.edge_tmp = (uint32_t)cur;          // temps occupy [rbp-cur .. ]
     }
 
-    // Check if we can omit the frame pointer (rbp): requires 0 local stack slots,
-    // <= 6 entry args (no [rbp+16] stack params), and no llvm.intr.vastart.
-    bool can_omit_fp = (g_x64_opt_level >= 1 && cur == 0);
-    bool fn_has_call = false;
-    if (can_omit_fp) {
-        if (nb > 0 && MLIR_GetBlockNumArgs(ctx, MLIR_GetRegionBlock(ctx, reg, 0)) > 6)
-            can_omit_fp = false;
-        for (size_t b = 0; b < nb && can_omit_fp; b++) {
-            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
-            size_t no = MLIR_GetBlockNumOps(ctx, bk);
-            for (size_t i = 0; i < no; i++) {
-                MLIR_OpType ot = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, bk, i));
-                if (ot == OP_TYPE_LLVM_INTR_VASTART) { can_omit_fp = false; break; }
-                if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL) fn_has_call = true;
-            }
-        }
-    }
+    // Check if we can omit the frame pointer (rbp):
+    // 1. 0-slot frame (`cur == 0`, `na <= 6`, `!fn_has_vastart`): push/pop callee-saved regs directly.
+    // 2. RSP-relative frame (`fn_can_rsp_frame`): `sub rsp, frame` (8 mod 16), freeing RBP as 6th callee-saved reg.
+    bool can_omit_fp = (g_x64_opt_level >= 1 && cur == 0 && !fn_has_vastart &&
+                        (nb == 0 || MLIR_GetBlockNumArgs(ctx, MLIR_GetRegionBlock(ctx, reg, 0)) <= 6));
     if (can_omit_fp) {
         F.omit_fp = true;
         F.fp_pad = fn_has_call && ((F.n_cs & 1) == 0);
@@ -3681,6 +3723,15 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         for (int j = 0; j < F.n_cs; j++)
             x64_emit1(&F, OP_TYPE_X64_PUSH_R, F.cs_reg[j]);
         if (F.fp_pad) x64_emit1(&F, OP_TYPE_X64_SUB_RSP, 8);
+    } else if (fn_can_rsp_frame) {
+        F.use_rsp_frame = true;
+        F.cs_base = cur;
+        cur += (int32_t)(F.n_cs * 8);
+        // call pushed 8-byte return address; frame must be 8 mod 16 so rsp is 16-byte aligned.
+        F.frame = cur > 0 ? (uint32_t)(((cur + 7) & ~15) + 8) : (fn_has_call ? 8u : 0u);
+        if (F.frame) x64_emit1(&F, OP_TYPE_X64_SUB_RSP, (int64_t)F.frame);
+        for (int j = 0; j < F.n_cs; j++)
+            store_rbp(&F, F.cs_base + 8 * (j + 1), F.cs_reg[j], 1);
     } else {
         F.cs_base = cur;                     // callee-saved spill area follows
         cur += (int32_t)(F.n_cs * 8);
@@ -4079,11 +4130,12 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                                                 x64_emit1(&F, OP_TYPE_X64_JCC, (int64_t)CC_LE | ((int64_t)exit_bi << 32));
                                                 if (w == 0)
                                                     x64_emit1(&F, OP_TYPE_X64_MOVSX, (int64_t)RAX | ((int64_t)RAX << 4) | (32ll << 8));
-                                                x64_emit1(&F, OP_TYPE_X64_PUSH_R, RDI);
                                                 int32_t baoff;
-                                                if (alloca_slot(&F, base_v, &baoff)) lea_rbp(&F, RDI, baoff);
-                                                else                                 load_val_w(&F, base_v, RDI, 1);
-                                                alu_rr(&F, 0x01 /*add*/, RDI, RAX, 1);
+                                                if (alloca_slot(&F, base_v, &baoff)) lea_rbp(&F, R11, baoff);
+                                                else                                 load_val_w(&F, base_v, R11, 1);
+                                                alu_rr(&F, 0x01 /*add*/, R11, RAX, 1);
+                                                x64_emit1(&F, OP_TYPE_X64_PUSH_R, RDI);
+                                                mov_rr(&F, RDI, R11, 1);
                                                 mov_ri(&F, RAX, (int64_t)(uint8_t)fill_c, 0);
                                                 x64_emit0(&F, OP_TYPE_X64_REP_STOSB);
                                                 x64_emit1(&F, OP_TYPE_X64_POP_R, RDI);
