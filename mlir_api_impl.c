@@ -1888,6 +1888,16 @@ int64_t MLIR_GetOpInlineI64(MLIR_Context *ctx, MLIR_OpHandle oh) {
     return (int64_t)((uint64_t)o->first_operand | ((uint64_t)o->first_result << 32));
 }
 
+void MLIR_RewriteVoidInlineI64(MLIR_Context *ctx, MLIR_OpHandle oh, MLIR_OpType t, int64_t val) {
+    IR_Op *o = &OPS(ctx)[OP_IDX(ctx, oh, "MLIR_RewriteVoidInlineI64")];
+    o->op_type = (uint16_t)t;
+    o->flags = OPF_INLINE_I64;
+    o->n_operands = 0;
+    o->n_results = 0;
+    o->first_operand = (uint32_t)(uint64_t)val;
+    o->first_result = (uint32_t)((uint64_t)val >> 32);
+}
+
 void MLIR_ReserveBlockOps(MLIR_Context *ctx, MLIR_BlockHandle bh, size_t cap) {
     uint32_t bi = BLOCK_IDX(ctx, bh, "MLIR_ReserveBlockOps");
     IR_Block *blk = &BLOCKS(ctx)[bi];

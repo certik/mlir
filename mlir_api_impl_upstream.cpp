@@ -875,6 +875,10 @@ extern "C" int64_t MLIR_GetOpInlineI64(MLIR_Context *ctx, MLIR_OpHandle op) {
     return MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE));
 }
 
+extern "C" void MLIR_RewriteVoidInlineI64(MLIR_Context *ctx, MLIR_OpHandle op, MLIR_OpType t, int64_t val) {
+    (void)ctx; (void)op; (void)t; (void)val;
+}
+
 extern "C" void MLIR_ReserveBlockOps(MLIR_Context *ctx, MLIR_BlockHandle block, size_t cap) {
     (void)ctx; (void)block; (void)cap;
 }
