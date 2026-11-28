@@ -359,6 +359,12 @@ static string print_operation_internal(PrintCtx *ctx, int indent_level, MLIR_OpH
     }
     {
         size_t n_attrs = MLIR_GetOpNumAttributes(ctx->mlir_ctx, op);
+        if (n_attrs == 0 && MLIR_OpHasInlineI64(ctx->mlir_ctx, op)) {
+            int64_t iv = MLIR_GetOpInlineI64(ctx->mlir_ctx, op);
+            strbuf_append(arena, &result, str_lit(" {value = "));
+            strbuf_append(arena, &result, format(arena, str_lit("{}"), iv));
+            strbuf_append(arena, &result, str_lit("}"));
+        }
         if (n_attrs > 0) {
             bool opened = false; bool first = true;
             int opty = parser_op_kind(&ctx->op_types, MLIR_GetOpType(ctx->mlir_ctx, op));

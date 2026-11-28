@@ -325,7 +325,7 @@ def link_wasm(obj_paths, wasm_path: Path):
 
 # Every output mode tinyC's driver accepts via --emit=.
 EMIT_MODES = ["mlir", "lowered", "llvm", "wasm", "wasmssa", "wasmstack",
-              "wat", "aarch64", "macho", "elf", "x64"]
+              "wat", "aarch64", "macho", "elf", "x64", "x64-mlir"]
 
 
 def check_driver_cli() -> list[str]:
@@ -333,7 +333,7 @@ def check_driver_cli() -> list[str]:
     problems = []
     usage = run([str(TINYC)])
     text = usage.stdout + usage.stderr
-    m = re.search(r"--emit=([a-z0-9|]+)", text)
+    m = re.search(r"--emit=([a-z0-9|-]+)", text)
     listed = m.group(1).split("|") if m else []
     if listed != EMIT_MODES:
         problems.append(f"usage lists --emit={'|'.join(listed)}, "
@@ -345,6 +345,11 @@ def check_driver_cli() -> list[str]:
         if r.returncode != 0 or not r.stdout.startswith("module"):
             problems.append(f"--emit={first} --emit=mlir did not print MLIR "
                             f"(exit {r.returncode})")
+    if TARGET == "elf":
+        rx = run([str(TINYC), "--emit=x64-mlir", str(simple)])
+        if rx.returncode != 0 or "x64.func" not in rx.stdout or "x64.ret" not in rx.stdout:
+            problems.append(f"--emit=x64-mlir did not print x64.* MLIR "
+                            f"(exit {rx.returncode})")
     r = run([str(TINYC), "--emit=nonsense", str(simple)])
     if r.returncode <= 0:
         problems.append(f"--emit=nonsense was accepted (exit {r.returncode})")

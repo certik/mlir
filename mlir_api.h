@@ -387,6 +387,26 @@ MLIR_ValueHandle MLIR_BuildUnary(MLIR_Builder *b, MLIR_OpType t,
 MLIR_OpHandle MLIR_BuildVoidBinary(MLIR_Builder *b, MLIR_OpType t,
         MLIR_ValueHandle x, MLIR_ValueHandle y);
 
+MLIR_OpHandle MLIR_BuildVoid(MLIR_Builder *b, MLIR_OpType t);
+
+MLIR_OpHandle MLIR_BuildVoidAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey key, MLIR_AttributeHandle val);
+
+MLIR_OpHandle MLIR_BuildVoid2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1);
+
+// Ultra-fast 0-operand, 0-result op carrying an inline 64-bit integer payload
+// (stored in the op record's unused operand/result index slots; zero attr/extra
+// allocation). Used by the x64.* target dialect.
+MLIR_OpHandle MLIR_BuildVoidInlineI64(MLIR_Builder *b, MLIR_OpType t, int64_t val);
+bool MLIR_OpHasInlineI64(MLIR_Context *ctx, MLIR_OpHandle op);
+int64_t MLIR_GetOpInlineI64(MLIR_Context *ctx, MLIR_OpHandle op);
+void MLIR_ReserveBlockOps(MLIR_Context *ctx, MLIR_BlockHandle block, size_t cap);
+void MLIR_ReserveOps(MLIR_Context *ctx, size_t extra_ops);
+uint32_t MLIR_GetOpCheckpoint(MLIR_Context *ctx);
+void MLIR_ResetBlockToCheckpoint(MLIR_Context *ctx, MLIR_BlockHandle block, uint32_t op_checkpoint);
+
 MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_AttrKey key, MLIR_AttributeHandle val);
 

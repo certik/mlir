@@ -130,6 +130,11 @@ static unsigned x64_struct_field_info(MLIR_Context *ctx, MLIR_TypeHandle sty, si
 
 // imul dst, src, imm32   (REX.W 69 /r id)
 static void imul_ri(FnCtx *F, uint8_t dst, uint8_t src, int32_t imm, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_IMUL_RI,
+                  (int64_t)dst | ((int64_t)src << 4) | ((int64_t)w << 8) | ((int64_t)(uint32_t)imm << 32));
+        return;
+    }
     rex(F, w, dst, 0, src); eb(F, 0x69); modrm(F, 3, dst, src); e32(F, (uint32_t)imm);
 }
 // reg += off: folds into `add reg, imm32` when it fits, else materialises the
@@ -137,7 +142,8 @@ static void imul_ri(FnCtx *F, uint8_t dst, uint8_t src, int32_t imm, int w) {
 static void add_const_off(FnCtx *F, uint8_t reg, int64_t off) {
     if (off == 0) return;
     if (off >= INT32_MIN && off <= INT32_MAX) {
-        rex(F, 1, 0, 0, reg); eb(F, 0x81); modrm(F, 3, 0, reg); e32(F, (uint32_t)(int32_t)off);
+        x64_emit1(F, OP_TYPE_X64_ADD_RI,
+                  (int64_t)reg | ((int64_t)(uint32_t)(int32_t)off << 32));
     } else {
         mov_ri(F, RCX, off, 1);
         alu_rr(F, 0x01, reg, RCX, 1);
@@ -189,15 +195,22 @@ static int block_index(MLIR_Context *ctx, MLIR_RegionHandle reg, MLIR_BlockHandl
 
 // emit setcc al ; movzx eax, al
 static void setcc_al(FnCtx *F, int cc) {
+    if (F->x64_blk) { x64_emit1(F, OP_TYPE_X64_SETCC_AL, cc); return; }
     eb(F, 0x0F); eb(F, (uint8_t)(0x90 + cc)); modrm(F, 3, 0, RAX);   // setcc al
     eb(F, 0x0F); eb(F, 0xB6); modrm(F, 3, RAX, RAX);                 // movzx eax, al
 }
 
 // cmovnz dst, src
 static void cmovnz(FnCtx *F, uint8_t dst, uint8_t src, int w) {
-    rex(F, w, dst, 0, src); eb(F, 0x0F); eb(F, 0x45); modrm(F, 3, dst, src);
+    x64_emit1(F, OP_TYPE_X64_CMOVCC,
+              (int64_t)dst | ((int64_t)src << 4) | ((int64_t)w << 8) | ((int64_t)CC_NE << 12));
 }
 static void cmovcc(FnCtx *F, uint8_t dst, uint8_t src, int cc, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_CMOVCC,
+                  (int64_t)dst | ((int64_t)src << 4) | ((int64_t)w << 8) | ((int64_t)cc << 12));
+        return;
+    }
     rex(F, w, dst, 0, src); eb(F, 0x0F); eb(F, (uint8_t)(0x40 + cc)); modrm(F, 3, dst, src);
 }
 
@@ -213,39 +226,70 @@ static void cmovcc(FnCtx *F, uint8_t dst, uint8_t src, int cc, int w) {
 
 // movq xmm, r/m64   (66 REX.W 0F 6E /r): GP -> xmm (low 64 bits)
 static void movq_xmm_gpr(FnCtx *F, uint8_t xmm, uint8_t gpr) {
+    if (F->x64_blk) { x64_emit1(F, OP_TYPE_X64_MOVQ_XMM_GPR, (int64_t)xmm | ((int64_t)gpr << 4)); return; }
     eb(F, 0x66); rex(F, 1, xmm, 0, gpr); eb(F, 0x0F); eb(F, 0x6E); modrm(F, 3, xmm, gpr);
 }
 // movq r/m64, xmm   (66 REX.W 0F 7E /r): xmm (low 64 bits) -> GP
 static void movq_gpr_xmm(FnCtx *F, uint8_t gpr, uint8_t xmm) {
+    if (F->x64_blk) { x64_emit1(F, OP_TYPE_X64_MOVQ_GPR_XMM, (int64_t)gpr | ((int64_t)xmm << 4)); return; }
     eb(F, 0x66); rex(F, 1, xmm, 0, gpr); eb(F, 0x0F); eb(F, 0x7E); modrm(F, 3, xmm, gpr);
 }
 // scalar double op: F2 0F <opc> /r   (xd = xd OP xs)
 static void sse_sd(FnCtx *F, uint8_t opc, uint8_t xd, uint8_t xs) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_SSE_OP, (int64_t)xd | ((int64_t)xs << 4) | ((int64_t)opc << 12));
+        return;
+    }
     eb(F, 0xF2); rex(F, 0, xd, 0, xs); eb(F, 0x0F); eb(F, opc); modrm(F, 3, xd, xs);
 }
 // scalar single op: F3 0F <opc> /r
 static void sse_ss(FnCtx *F, uint8_t opc, uint8_t xd, uint8_t xs) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_SSE_OP, (int64_t)xd | ((int64_t)xs << 4) | (1ll << 8) | ((int64_t)opc << 12));
+        return;
+    }
     eb(F, 0xF3); rex(F, 0, xd, 0, xs); eb(F, 0x0F); eb(F, opc); modrm(F, 3, xd, xs);
 }
 // cvtsi2sd/ss xmm, r/m (pfx [REX.W] 0F 2A /r): signed int (GP) -> float (xmm)
 static void cvtsi2f(FnCtx *F, uint8_t pfx, uint8_t xmm, uint8_t gpr, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_CVTSI2F,
+                  (int64_t)xmm | ((int64_t)gpr << 4) | ((int64_t)w << 8) | ((int64_t)pfx << 12));
+        return;
+    }
     eb(F, pfx); rex(F, w, xmm, 0, gpr); eb(F, 0x0F); eb(F, 0x2A); modrm(F, 3, xmm, gpr);
 }
 // cvttsd2si/ss r, xmm (pfx [REX.W] 0F 2C /r): float (xmm) -> signed int (GP), trunc
 static void cvtf2si(FnCtx *F, uint8_t pfx, uint8_t gpr, uint8_t xmm, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_CVTF2SI,
+                  (int64_t)gpr | ((int64_t)xmm << 4) | ((int64_t)w << 8) | ((int64_t)pfx << 12));
+        return;
+    }
     eb(F, pfx); rex(F, w, gpr, 0, xmm); eb(F, 0x0F); eb(F, 0x2C); modrm(F, 3, gpr, xmm);
 }
 // cvtss2sd / cvtsd2ss xmm, xmm (pfx 0F 5A /r): float-width convert
 static void cvt_f2f(FnCtx *F, uint8_t pfx, uint8_t xd, uint8_t xs) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_CVT_F2F,
+                  (int64_t)xd | ((int64_t)xs << 4) | ((int64_t)pfx << 12));
+        return;
+    }
     eb(F, pfx); rex(F, 0, xd, 0, xs); eb(F, 0x0F); eb(F, 0x5A); modrm(F, 3, xd, xs);
 }
 // ucomisd (66 0F 2E) / ucomiss (0F 2E): ordered compare, sets ZF/PF/CF
 static void ucomis(FnCtx *F, int is_f32, uint8_t x1, uint8_t x2) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_UCOMIS,
+                  (int64_t)x1 | ((int64_t)x2 << 4) | ((int64_t)(is_f32 ? 1 : 0) << 8));
+        return;
+    }
     if (!is_f32) eb(F, 0x66);
     rex(F, 0, x1, 0, x2); eb(F, 0x0F); eb(F, 0x2E); modrm(F, 3, x1, x2);
 }
 // setcc into the low byte of AL/CL (rm in {RAX,RCX})
 static void setcc8(FnCtx *F, int cc, uint8_t rm) {
+    if (F->x64_blk) { x64_emit1(F, OP_TYPE_X64_SETCC8, (int64_t)cc | ((int64_t)rm << 4)); return; }
     eb(F, 0x0F); eb(F, (uint8_t)(0x90 + cc)); modrm(F, 3, 0, rm);
 }
 
@@ -281,9 +325,9 @@ static void emit_fcmp(FnCtx *F, int64_t pred, int is_f32) {
     setcc8(F, cc1, RAX);
     if (combine) {
         setcc8(F, cc2, RCX);
-        eb(F, combine == 1 ? 0x20 : 0x08); modrm(F, 3, RCX, RAX);  // and/or al, cl
+        x64_emit1(F, OP_TYPE_X64_ALU8_AL_CL, combine == 1 ? 0x20 : 0x08);
     }
-    eb(F, 0x0F); eb(F, 0xB6); modrm(F, 3, RAX, RAX);               // movzx eax, al
+    x64_emit0(F, OP_TYPE_X64_MOVZX_EAX_AL);
 }
 
 // Lower an FP op (arith / convert / compare). Returns false if `ty` is not an
@@ -339,7 +383,7 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
             if (sfb == 4) sse_ss(F, 0x5C, 0, 1); else sse_sd(F, 0x5C, 0, 1);  // x - 2^63
             cvtf2si(F, pfx, RCX, 0, 1);
             mov_rr(F, RDX, RAX, 1);
-            rex(F, 1, 0, 0, RDX); eb(F, 0xC1); modrm(F, 3, 7, RDX); eb(F, 63);  // sar rdx, 63
+            x64_emit1(F, OP_TYPE_X64_SHIFT_IMM, (int64_t)RDX | (7ll << 4) | (1ll << 8) | (63ll << 12)); // sar rdx, 63
             alu_rr(F, 0x21, RCX, RDX, 1);                                       // and rcx, rdx
             alu_rr(F, 0x09, RAX, RCX, 1);                                       // or rax, rcx
         }
@@ -362,7 +406,7 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
             // (x >> 1) | (x & 1) (the sticky bit keeps the rounding right) and
             // double it, then pick that result when x is "negative".
             mov_rr(F, RCX, RAX, 1);
-            rex(F, 1, 0, 0, RCX); eb(F, 0xD1); modrm(F, 3, 5, RCX);  // shr rcx, 1
+            x64_emit1(F, OP_TYPE_X64_SHIFT_IMM, (int64_t)RCX | (5ll << 4) | (1ll << 8) | (1ll << 12)); // shr rcx, 1
             mov_ri(F, RDX, 1, 1);
             alu_rr(F, 0x21, RDX, RAX, 1);                          // and rdx, rax
             alu_rr(F, 0x09, RCX, RDX, 1);                          // or rcx, rdx
@@ -450,7 +494,8 @@ static void emit_edge(FnCtx *F, MLIR_OpHandle term, size_t si, MLIR_BlockHandle 
 static void emit_epilogue(FnCtx *F) {
     for (int j = F->n_cs - 1; j >= 0; j--)
         load_rbp(F, F->cs_reg[j], F->cs_base + 8 * (j + 1), 1);
-    eb(F, 0xC9); eb(F, 0xC3);   // leave ; ret
+    x64_emit0(F, OP_TYPE_X64_LEAVE);
+    x64_emit0(F, OP_TYPE_X64_RET);
 }
 
 // Module-wide lowering state for one mlir_llvm_to_elf() call (set in that entry
@@ -486,10 +531,10 @@ static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
     if (reg_cutoff > no) reg_cutoff = no;
     size_t nstack = no - reg_cutoff;
     size_t pad = nstack & 1;
-    if (pad) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, 0x08); }  // sub rsp, 8
+    if (pad) x64_emit1(F, OP_TYPE_X64_SUB_RSP, 8);
     for (size_t i = no; i > reg_cutoff; i--) {
         load_val(F, MLIR_GetOpOperand(F->ctx, op, arg_base + i - 1), RAX);
-        eb(F, 0x50);                                  // push rax
+        x64_emit1(F, OP_TYPE_X64_PUSH_R, RAX);
     }
     for (size_t i = 0; i < reg_cutoff; i++)
         load_val(F, MLIR_GetOpOperand(F->ctx, op, arg_base + i), ARG_REGS[i]);
@@ -500,9 +545,7 @@ static void emit_sysv_call_args(FnCtx *F, MLIR_OpHandle op, size_t arg_base,
 
 // emit `call rel32` to a named symbol (direct-call fast path).
 static void emit_direct_call(FnCtx *F, string callee, SymSet *refs) {
-    eb(F, 0xE8);
-    uint32_t field = here(F); e32(F, 0);
-    add_text_reloc(F, field, callee);
+    x64_emit1s(F, OP_TYPE_X64_CALL_SYM, callee);
     if (refs) sym_add(refs, callee);
 }
 
@@ -584,12 +627,9 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         load_val(F, MLIR_GetOpOperand(ctx, op, 0), RAX);
         load_val(F, MLIR_GetOpOperand(ctx, op, 1), RCX);
         if (sdiv || srem) {
-            if (w) eb(F, 0x48);
-            eb(F, 0x99);                          // cqo / cdq
-            rex(F, w, 0, 0, RCX); eb(F, 0xF7); modrm(F, 3, 7, RCX);   // idiv rcx
+            x64_emit1(F, OP_TYPE_X64_IDIV, (int64_t)RCX | ((int64_t)w << 8));
         } else {
-            alu_rr(F, 0x31, RDX, RDX, 0);         // xor edx,edx
-            rex(F, w, 0, 0, RCX); eb(F, 0xF7); modrm(F, 3, 6, RCX);   // div rcx
+            x64_emit1(F, OP_TYPE_X64_DIV, (int64_t)RCX | ((int64_t)w << 8));
         }
         store_val(F, r, (sdiv || udiv) ? RAX : RDX);
         return;
@@ -607,14 +647,15 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             bool has_rD = val_in_reg(F, r, &rD);
             uint8_t dst = has_rD ? rD : RAX;
             load_val_w(F, a0, dst, w);
-            if (imm == 1)      { rex(F, w, 0, 0, dst); eb(F, 0xD1); modrm(F, 3, ext, dst); }
-            else if (imm != 0) { rex(F, w, 0, 0, dst); eb(F, 0xC1); modrm(F, 3, ext, dst); eb(F, (uint8_t)imm); }
+            if (imm != 0)
+                x64_emit1(F, OP_TYPE_X64_SHIFT_IMM,
+                          (int64_t)dst | ((int64_t)ext << 4) | ((int64_t)w << 8) | ((int64_t)imm << 12));
             if (!has_rD) store_val_w(F, r, dst, w);
             return;
         }
         load_val(F, a0, RAX);
         load_val(F, a1, RCX);
-        rex(F, w, 0, 0, RAX); eb(F, 0xD3); modrm(F, 3, ext, RAX);
+        x64_emit1(F, OP_TYPE_X64_SHIFT_CL, (int64_t)RAX | ((int64_t)ext << 4) | ((int64_t)w << 8));
         store_val(F, r, RAX);
         return;
     }
@@ -665,7 +706,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         int rb = int_bits(ctx, r);
         load_val(F, MLIR_GetOpOperand(ctx, op, 0), RAX);
         if (rb && rb < 32) {                           // mask low rb bits
-            eb(F, 0x25); e32(F, (rb >= 32) ? 0xffffffffu : ((1u << rb) - 1u));  // and eax, imm32
+            uint32_t mask = (rb >= 32) ? 0xffffffffu : ((1u << rb) - 1u);
+            x64_emit1(F, OP_TYPE_X64_AND_EAX_IMM, (int64_t)mask);
         }
         store_val(F, r, RAX);
         return;
@@ -675,9 +717,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         MLIR_ValueHandle s = MLIR_GetOpOperand(ctx, op, 0);
         int sb = int_bits(ctx, s);
         load_val(F, s, RAX);
-        if (sb == 32)      { rex(F,1,RAX,0,RAX); eb(F,0x63); modrm(F,3,RAX,RAX); }       // movsxd rax,eax
-        else if (sb == 16) { rex(F,1,RAX,0,RAX); eb(F,0x0F); eb(F,0xBF); modrm(F,3,RAX,RAX); }
-        else               { rex(F,1,RAX,0,RAX); eb(F,0x0F); eb(F,0xBE); modrm(F,3,RAX,RAX); } // i1/i8
+        int bits = (sb == 32) ? 32 : (sb == 16) ? 16 : 8;
+        x64_emit1(F, OP_TYPE_X64_MOVSX, (int64_t)RAX | ((int64_t)RAX << 4) | ((int64_t)bits << 8));
         store_val(F, r, RAX);
         return;
     }
@@ -767,9 +808,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 // load_val zero-extends a 32-bit index, so a negative index
                 // (e.g. `p - 1`) would scale as 0xFFFFFFFF*stride; sign-extend
                 // narrow indices first.
-                if (ib == 32)      { rex(F,1,RCX,0,RCX); eb(F,0x63); modrm(F,3,RCX,RCX); }              // movsxd rcx,ecx
-                else if (ib == 16) { rex(F,1,RCX,0,RCX); eb(F,0x0F); eb(F,0xBF); modrm(F,3,RCX,RCX); }  // movsx rcx,cx
-                else if (ib && ib < 16) { rex(F,1,RCX,0,RCX); eb(F,0x0F); eb(F,0xBE); modrm(F,3,RCX,RCX); } // movsx rcx,cl
+                if (ib == 32 || ib == 16 || (ib && ib < 16)) {
+                    int bits = (ib == 32) ? 32 : (ib == 16) ? 16 : 8;
+                    x64_emit1(F, OP_TYPE_X64_MOVSX, (int64_t)RCX | ((int64_t)RCX << 4) | ((int64_t)bits << 8));
+                }
                 if (stride != 1) imul_ri(F, RCX, RCX, (int32_t)stride, 1);  // rcx *= stride
                 alu_rr(F, 0x01, RAX, RCX, 1);              // add rax, rcx
             } else if (ci != 0) {
@@ -805,11 +847,11 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             if (is_sc6) {
                 if (no != 7) { fail(F, "__tinyc_syscall6 expects 7 args", callee); return; }
                 load_val(F, MLIR_GetOpOperand(ctx, op, 6), RAX);
-                eb(F, 0x50);                                 // push rax (a6)
+                x64_emit1(F, OP_TYPE_X64_PUSH_R, RAX);       // push rax (a6)
                 for (size_t i = 0; i < 6; i++)
                     load_val(F, MLIR_GetOpOperand(ctx, op, i), ARG_REGS[i]);
                 emit_direct_call(F, callee, refs);
-                eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, 0x08);  // add rsp, 8
+                x64_emit1(F, OP_TYPE_X64_ADD_RSP, 8);        // add rsp, 8
                 if (MLIR_GetOpNumResults(ctx, op) == 1)
                     store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                 return;
@@ -821,15 +863,13 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         size_t nstack = 0, pad = 0;
         emit_sysv_call_args(F, op, arg_base, &nstack, &pad);
         if (is_indirect) {
-            rex(F, 0, 0, 0, R11);
-            eb(F, 0xFF);
-            modrm(F, 3, 2, R11);   // call *r11
+            x64_emit1(F, OP_TYPE_X64_CALL_REG, R11);         // call *r11
         } else {
             emit_direct_call(F, callee, refs);
         }
         if (nstack) {
             uint32_t cleanup = (uint32_t)((nstack + pad) * 8);   // pop stack args + pad
-            rex(F, 1, 0, 0, RSP); eb(F, 0x81); modrm(F, 3, 0, RSP); e32(F, cleanup);  // add rsp, imm32
+            x64_emit1(F, OP_TYPE_X64_ADD_RSP, (int64_t)cleanup);
         }
         if (MLIR_GetOpNumResults(ctx, op) == 1)
             store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
@@ -845,8 +885,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         // n_fixed-6)*8]. Store that address into the va_list slot (operand 0).
         int32_t disp = 16 + (F->n_fixed > 6 ? (int32_t)(F->n_fixed - 6) * 8 : 0);
         load_val(F, MLIR_GetOpOperand(ctx, op, 0), RCX);              // va_list address
-        rex(F, 1, RAX, 0, 0); eb(F, 0x8D); modrm(F, 2, RAX, RBP); e32(F, (uint32_t)disp); // lea rax,[rbp+disp]
-        store_mem(F, RCX, RAX, 8);                               // *va_list = cursor
+        lea_rbp(F, RAX, -disp);                                       // lea rax, [rbp + disp]
+        store_mem(F, RCX, RAX, 8);                                    // *va_list = cursor
         return;
     }
     case OP_TYPE_LLVM_INTR_VAEND: return;                  // stack cursor: no teardown
@@ -918,8 +958,7 @@ static void lower_term(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle op,
         MLIR_BlockHandle t = MLIR_GetOpSuccessor(F->ctx, op, 0);
         emit_edge(F, op, 0, t);
         if (t != next_blk) {
-            eb(F, 0xE9); uint32_t field = here(F); e32(F, 0);
-            add_fix(F, block_index(F->ctx, reg, t), field);
+            x64_emit1(F, OP_TYPE_X64_JMP, block_index(F->ctx, reg, t));
         }
         return;
     }
@@ -936,46 +975,35 @@ static void lower_term(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle op,
         bool need_f = nso_f > 0;
         load_val(F, MLIR_GetOpOperand(F->ctx, op, 0), RAX);      // cond
         alu_rr(F, 0x85, RAX, RAX, 0);                            // test eax, eax
+        int tti = block_index(F->ctx, reg, tt);
+        int fti = block_index(F->ctx, reg, ft);
         if (!need_t && !need_f) {
             if (ft == next_blk) {
-                eb(F, 0x0F); eb(F, (uint8_t)(0x80 + CC_NE));     // jne true
-                uint32_t f_jne = here(F); e32(F, 0);
-                add_fix(F, block_index(F->ctx, reg, tt), f_jne);
+                x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_NE | ((int64_t)(uint32_t)tti << 32));
                 return;
             }
             if (tt == next_blk) {
-                eb(F, 0x0F); eb(F, (uint8_t)(0x80 + CC_E));      // je false
-                uint32_t f_je = here(F); e32(F, 0);
-                add_fix(F, block_index(F->ctx, reg, ft), f_je);
+                x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_E | ((int64_t)(uint32_t)fti << 32));
                 return;
             }
         }
-        eb(F, 0x0F); eb(F, (uint8_t)(0x80 + CC_NE));     // jne true
-        uint32_t f_jne = here(F); e32(F, 0);
-        eb(F, 0xE9); uint32_t f_jmp = here(F); e32(F, 0); // jmp false
+        int pad_t = need_t ? F->x64_next_label++ : tti;
+        int pad_f = need_f ? F->x64_next_label++ : fti;
+        x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_NE | ((int64_t)(uint32_t)pad_t << 32));
+        x64_emit1(F, OP_TYPE_X64_JMP, pad_f);
         if (need_t) {
-            patch_rel32_at(F, f_jne, here(F));
+            x64_emit1(F, OP_TYPE_X64_LABEL, pad_t);
             emit_edge(F, op, 0, tt);
-            if (need_f || tt != next_blk) {
-                eb(F, 0xE9); uint32_t f_br = here(F); e32(F, 0);
-                add_fix(F, block_index(F->ctx, reg, tt), f_br);
-            }
-        } else {
-            add_fix(F, block_index(F->ctx, reg, tt), f_jne);
+            if (need_f || tt != next_blk) x64_emit1(F, OP_TYPE_X64_JMP, tti);
         }
         if (need_f) {
-            patch_rel32_at(F, f_jmp, here(F));
+            x64_emit1(F, OP_TYPE_X64_LABEL, pad_f);
             emit_edge(F, op, 1, ft);
-            if (ft != next_blk) {
-                eb(F, 0xE9); uint32_t f_br = here(F); e32(F, 0);
-                add_fix(F, block_index(F->ctx, reg, ft), f_br);
-            }
-        } else {
-            add_fix(F, block_index(F->ctx, reg, ft), f_jmp);
+            if (ft != next_blk) x64_emit1(F, OP_TYPE_X64_JMP, fti);
         }
         return;
     }
-    case OP_TYPE_LLVM_UNREACHABLE: eb(F, 0x0F); eb(F, 0x0B); return;  // ud2
+    case OP_TYPE_LLVM_UNREACHABLE: x64_emit0(F, OP_TYPE_X64_UD2); return;  // ud2
     default: break;
     }
     fail(F, "unsupported terminator", MLIR_GetOpTypeName(F->ctx, MLIR_GetOpType(F->ctx, op)));
@@ -1058,26 +1086,311 @@ static void emit_fused_cond_br(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle br
 
     MLIR_BlockHandle tt = MLIR_GetOpSuccessor(ctx, br_op, 0);
     MLIR_BlockHandle ft = MLIR_GetOpSuccessor(ctx, br_op, 1);
+    int tti = block_index(ctx, reg, tt);
+    int fti = block_index(ctx, reg, ft);
     if (ft == next_blk) {
-        eb(F, 0x0F); eb(F, (uint8_t)(0x80 + cc));
-        uint32_t fld = here(F); e32(F, 0);
-        add_fix(F, block_index(ctx, reg, tt), fld);
+        x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)cc | ((int64_t)(uint32_t)tti << 32));
         return;
     }
     if (tt == next_blk) {
-        eb(F, 0x0F); eb(F, (uint8_t)(0x80 + (cc ^ 1)));
-        uint32_t fld = here(F); e32(F, 0);
-        add_fix(F, block_index(ctx, reg, ft), fld);
+        x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)(cc ^ 1) | ((int64_t)(uint32_t)fti << 32));
         return;
     }
-    eb(F, 0x0F); eb(F, (uint8_t)(0x80 + cc));
-    uint32_t f_t = here(F); e32(F, 0);
-    add_fix(F, block_index(ctx, reg, tt), f_t);
-    eb(F, 0xE9); uint32_t f_f = here(F); e32(F, 0);
-    add_fix(F, block_index(ctx, reg, ft), f_f);
+    x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)cc | ((int64_t)(uint32_t)tti << 32));
+    x64_emit1(F, OP_TYPE_X64_JMP, fti);
 }
 
-static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymSet *refs) {
+// ---------------------------------------------------------------------------
+// Pass 2 of the x64.* MLIR dialect backend: encode a block of `x64.*` ops
+// into x86_64 machine bytes + relocations + intra-function branch fixups.
+// ---------------------------------------------------------------------------
+static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
+    MLIR_Context *ctx = F->ctx;
+    static uint32_t *g_lbl_off = NULL;
+    static size_t g_lbl_cap = 0;
+    size_t need = n_labels ? n_labels : 1;
+    if (need > g_lbl_cap) {
+        if (g_lbl_off) buddy_free(g_lbl_off);
+        size_t want = need < 64 ? 64 : need * 2;
+        size_t actual = 0;
+        g_lbl_off = (uint32_t *)buddy_alloc(want * sizeof(uint32_t), &actual);
+        g_lbl_cap = actual / sizeof(uint32_t);
+    }
+    F->x64_blk = MLIR_INVALID_HANDLE; // switch low-level helpers to direct byte emission
+    F->n_fix = 0;
+
+    size_t n_ops = MLIR_GetBlockNumOps(ctx, blk);
+    for (size_t i = 0; i < n_ops; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+        MLIR_OpType ty = MLIR_GetOpType(ctx, op);
+        switch (ty) {
+        case OP_TYPE_X64_LABEL: {
+            int64_t id = MLIR_GetOpInlineI64(ctx, op);
+            g_lbl_off[(size_t)id] = here(F);
+            break;
+        }
+        case OP_TYPE_X64_PUSH_R: {
+            uint8_t r = (uint8_t)MLIR_GetOpInlineI64(ctx, op);
+            if (r >= 8) eb(F, 0x41);
+            eb(F, (uint8_t)(0x50 + (r & 7)));
+            break;
+        }
+        case OP_TYPE_X64_SUB_RSP: {
+            uint32_t imm = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+            if (imm <= 127) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, (uint8_t)imm); }
+            else            { rex(F, 1, 0, 0, RSP); eb(F, 0x81); modrm(F, 3, 5, RSP); e32(F, imm); }
+            break;
+        }
+        case OP_TYPE_X64_ADD_RSP: {
+            uint32_t imm = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+            if (imm <= 127) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 0, RSP); eb(F, (uint8_t)imm); }
+            else            { rex(F, 1, 0, 0, RSP); eb(F, 0x81); modrm(F, 3, 0, RSP); e32(F, imm); }
+            break;
+        }
+        case OP_TYPE_X64_LEAVE: eb(F, 0xC9); break;
+        case OP_TYPE_X64_RET:   eb(F, 0xC3); break;
+        case OP_TYPE_X64_UD2:   eb(F, 0x0F); eb(F, 0x0B); break;
+        case OP_TYPE_X64_MOV_RR: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            mov_rr(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_MOV_RI: {
+            uint64_t v = (uint64_t)MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE));
+            int64_t imm = MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_IMM));
+            mov_ri(F, (uint8_t)(v & 15), imm, (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_MOV_RI32: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            int w = (int)((v >> 8) & 1);
+            int64_t imm = w ? (int64_t)(int32_t)(uint32_t)(v >> 32) : (int64_t)(uint32_t)(v >> 32);
+            mov_ri(F, (uint8_t)(v & 15), imm, w);
+            break;
+        }
+        case OP_TYPE_X64_ALU_RR: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            alu_rr(F, (uint8_t)((v >> 12) & 0xff), (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_ALU_RI: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            alu_ri(F, (uint8_t)((v >> 4) & 7), (uint8_t)(v & 15), (int32_t)(uint32_t)(v >> 32), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_ADD_RI: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t reg = (uint8_t)(v & 15);
+            uint32_t imm = (uint32_t)(v >> 32);
+            rex(F, 1, 0, 0, reg); eb(F, 0x81); modrm(F, 3, 0, reg); e32(F, imm);
+            break;
+        }
+        case OP_TYPE_X64_AND_EAX_IMM: {
+            uint32_t mask = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
+            eb(F, 0x25); e32(F, mask);
+            break;
+        }
+        case OP_TYPE_X64_IMUL_RR: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            imul_rr(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_IMUL_RI: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            imul_ri(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int32_t)(uint32_t)(v >> 32), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_IDIV: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t reg = (uint8_t)(v & 15); int w = (int)((v >> 8) & 1);
+            if (w) eb(F, 0x48);
+            eb(F, 0x99);
+            rex(F, w, 0, 0, reg); eb(F, 0xF7); modrm(F, 3, 7, reg);
+            break;
+        }
+        case OP_TYPE_X64_DIV: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t reg = (uint8_t)(v & 15); int w = (int)((v >> 8) & 1);
+            alu_rr(F, 0x31, RDX, RDX, 0);
+            rex(F, w, 0, 0, reg); eb(F, 0xF7); modrm(F, 3, 6, reg);
+            break;
+        }
+        case OP_TYPE_X64_SHIFT_CL: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t reg = (uint8_t)(v & 15); int ext = (int)((v >> 4) & 7); int w = (int)((v >> 8) & 1);
+            rex(F, w, 0, 0, reg); eb(F, 0xD3); modrm(F, 3, ext, reg);
+            break;
+        }
+        case OP_TYPE_X64_SHIFT_IMM: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t reg = (uint8_t)(v & 15); int ext = (int)((v >> 4) & 7);
+            int w = (int)((v >> 8) & 1); uint8_t imm = (uint8_t)((v >> 12) & 0xff);
+            if (imm == 1) { rex(F, w, 0, 0, reg); eb(F, 0xD1); modrm(F, 3, ext, reg); }
+            else          { rex(F, w, 0, 0, reg); eb(F, 0xC1); modrm(F, 3, ext, reg); eb(F, imm); }
+            break;
+        }
+        case OP_TYPE_X64_LOAD_RBP: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            load_rbp(F, (uint8_t)(v & 15), (int32_t)(uint32_t)(v >> 32), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_STORE_RBP: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            store_rbp(F, (int32_t)(uint32_t)(v >> 32), (uint8_t)(v & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_LOAD_RBP_SIZED: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            load_rbp_sized(F, (uint8_t)(v & 15), (int32_t)(uint32_t)(v >> 32), (int)((v >> 4) & 15));
+            break;
+        }
+        case OP_TYPE_X64_STORE_RBP_SIZED: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            store_rbp_sized(F, (int32_t)(uint32_t)(v >> 32), (uint8_t)(v & 15), (int)((v >> 4) & 15));
+            break;
+        }
+        case OP_TYPE_X64_LEA_RBP: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            lea_rbp(F, (uint8_t)(v & 15), (int32_t)(uint32_t)(v >> 32));
+            break;
+        }
+        case OP_TYPE_X64_LOAD_MEM: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            load_mem(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 15), ((v >> 12) & 1) != 0);
+            break;
+        }
+        case OP_TYPE_X64_STORE_MEM: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            store_mem(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 15));
+            break;
+        }
+        case OP_TYPE_X64_LEA_RIP_DATA: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            lea_rip_data(F, (uint8_t)(v & 15), (int64_t)(uint32_t)(v >> 32));
+            break;
+        }
+        case OP_TYPE_X64_LEA_RIP_FUNC: {
+            uint8_t reg = (uint8_t)MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE));
+            string sym = MLIR_GetAttributeString(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME));
+            lea_rip_func(F, reg, sym);
+            break;
+        }
+        case OP_TYPE_X64_MOVSX: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t dst = (uint8_t)(v & 15), src = (uint8_t)((v >> 4) & 15);
+            int bits = (int)((v >> 8) & 0xff);
+            if (bits == 32)      { rex(F, 1, dst, 0, src); eb(F, 0x63); modrm(F, 3, dst, src); }
+            else if (bits == 16) { rex(F, 1, dst, 0, src); eb(F, 0x0F); eb(F, 0xBF); modrm(F, 3, dst, src); }
+            else                 { rex(F, 1, dst, 0, src); eb(F, 0x0F); eb(F, 0xBE); modrm(F, 3, dst, src); }
+            break;
+        }
+        case OP_TYPE_X64_SETCC_AL: {
+            setcc_al(F, (int)MLIR_GetOpInlineI64(ctx, op));
+            break;
+        }
+        case OP_TYPE_X64_SETCC8: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            setcc8(F, (int)(v & 15), (uint8_t)((v >> 4) & 15));
+            break;
+        }
+        case OP_TYPE_X64_MOVZX_EAX_AL: {
+            eb(F, 0x0F); eb(F, 0xB6); modrm(F, 3, RAX, RAX);
+            break;
+        }
+        case OP_TYPE_X64_ALU8_AL_CL: {
+            eb(F, (uint8_t)MLIR_GetOpInlineI64(ctx, op)); modrm(F, 3, RCX, RAX);
+            break;
+        }
+        case OP_TYPE_X64_CMOVCC: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            cmovcc(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 12) & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_JMP: {
+            int lbl = (int)MLIR_GetOpInlineI64(ctx, op);
+            eb(F, 0xE9); uint32_t fld = here(F); e32(F, 0);
+            add_fix(F, lbl, fld);
+            break;
+        }
+        case OP_TYPE_X64_JCC: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            int cc = (int)(v & 15);
+            int lbl = (int)(uint32_t)(v >> 32);
+            eb(F, 0x0F); eb(F, (uint8_t)(0x80 + cc));
+            uint32_t fld = here(F); e32(F, 0);
+            add_fix(F, lbl, fld);
+            break;
+        }
+        case OP_TYPE_X64_CALL_SYM: {
+            string sym = MLIR_GetAttributeString(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME));
+            eb(F, 0xE8); uint32_t fld = here(F); e32(F, 0);
+            add_text_reloc(F, fld, sym);
+            break;
+        }
+        case OP_TYPE_X64_CALL_REG: {
+            uint8_t r = (uint8_t)MLIR_GetOpInlineI64(ctx, op);
+            rex(F, 0, 0, 0, r); eb(F, 0xFF); modrm(F, 3, 2, r);
+            break;
+        }
+        case OP_TYPE_X64_MOVQ_XMM_GPR: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            movq_xmm_gpr(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15));
+            break;
+        }
+        case OP_TYPE_X64_MOVQ_GPR_XMM: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            movq_gpr_xmm(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15));
+            break;
+        }
+        case OP_TYPE_X64_SSE_OP: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t xd = (uint8_t)(v & 15), xs = (uint8_t)((v >> 4) & 15);
+            int is_ss = (int)((v >> 8) & 1); uint8_t opc = (uint8_t)((v >> 12) & 0xff);
+            if (is_ss) sse_ss(F, opc, xd, xs); else sse_sd(F, opc, xd, xs);
+            break;
+        }
+        case OP_TYPE_X64_CVTSI2F: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            cvtsi2f(F, (uint8_t)((v >> 12) & 0xff), (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_CVTF2SI: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            cvtf2si(F, (uint8_t)((v >> 12) & 0xff), (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15), (int)((v >> 8) & 1));
+            break;
+        }
+        case OP_TYPE_X64_CVT_F2F: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            cvt_f2f(F, (uint8_t)((v >> 12) & 0xff), (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15));
+            break;
+        }
+        case OP_TYPE_X64_UCOMIS: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            ucomis(F, (int)((v >> 8) & 1), (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15));
+            break;
+        }
+        default:
+            fail(F, "unsupported x64 dialect op", MLIR_GetOpTypeName(ctx, ty));
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < F->n_fix; i++) {
+        int tb = F->fix[i].target_block;
+        uint32_t fld = F->fix[i].field_off;
+        int32_t rel = (int32_t)g_lbl_off[tb] - (int32_t)(fld + 4);
+        buf_patch_le32(&F->f->code, fld, (uint32_t)rel);
+    }
+}
+
+// Reusable per-function x64.* MLIR scratch block (L1-hot across functions;
+// reset via MLIR_ResetBlockToCheckpoint after each function is encoded).
+static MLIR_Context    *g_x64_cached_ctx = NULL;
+static MLIR_TypeHandle  g_x64_cached_i64 = MLIR_INVALID_HANDLE;
+static MLIR_BlockHandle g_x64_reusable_blk = MLIR_INVALID_HANDLE;
+
+static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
+                             SymSet *refs, MLIR_BlockHandle retain_blk) {
     FnCtx F; memset(&F, 0, sizeof(F));
     F.ctx = ctx; F.f = f; F.ok = true;
     F.fix = g_x64_fix;
@@ -1089,19 +1402,19 @@ static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymS
 
     MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
-    F.n_blocks = nb;
-    static uint32_t *g_x64_block_off = NULL;
-    static size_t g_x64_block_off_cap = 0;
-    size_t nb_need = nb ? nb : 1;
-    if (nb_need > g_x64_block_off_cap) {
-        if (g_x64_block_off) buddy_free(g_x64_block_off);
-        size_t want_cap = nb_need < 64 ? 64 : nb_need * 2;
-        size_t actual_bo = 0;
-        g_x64_block_off = (uint32_t *)buddy_alloc(want_cap * sizeof(uint32_t), &actual_bo);
-        g_x64_block_off_cap = actual_bo / sizeof(uint32_t);
+
+    if (ctx != g_x64_cached_ctx) {
+        g_x64_cached_ctx = ctx;
+        g_x64_cached_i64 = MLIR_CreateTypeInteger(ctx, 64, false);
+        g_x64_reusable_blk = MLIR_CreateBlock(ctx);
+        MLIR_ReserveBlockOps(ctx, g_x64_reusable_blk, 8192);
     }
-    memset(g_x64_block_off, 0, nb_need * sizeof(uint32_t));
-    F.block_off = g_x64_block_off;
+    MLIR_BlockHandle x64_blk = (retain_blk != MLIR_INVALID_HANDLE) ? retain_blk : g_x64_reusable_blk;
+    uint32_t x64_op_cp = (retain_blk == MLIR_INVALID_HANDLE) ? MLIR_GetOpCheckpoint(ctx) : 0;
+    F.x64_blk = x64_blk;
+    F.x64_bd = MLIR_BuilderAtEnd(ctx, x64_blk);
+    F.x64_i64 = g_x64_cached_i64;
+    F.x64_next_label = (int)nb;
 
     // --- register allocation: shared linear-scan allocator -> F.rm
     //     (value -> physical register). Values it leaves out stay in frame
@@ -1246,9 +1559,9 @@ static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymS
     F.frame = (uint32_t)((cur + 15) & ~15);
 
     // --- prologue: push rbp ; mov rbp,rsp ; sub rsp, frame ---
-    eb(&F, 0x55);
-    rex(&F, 1, 0, 0, RBP); eb(&F, 0x89); modrm(&F, 3, RSP, RBP);    // mov rbp, rsp
-    if (F.frame) { rex(&F, 1, 0, 0, RSP); eb(&F, 0x81); modrm(&F, 3, 5, RSP); e32(&F, F.frame); } // sub rsp, imm32
+    x64_emit1(&F, OP_TYPE_X64_PUSH_R, RBP);
+    mov_rr(&F, RBP, RSP, 1);
+    if (F.frame) x64_emit1(&F, OP_TYPE_X64_SUB_RSP, (int64_t)F.frame);
 
     // save the callee-saved registers the allocator used
     for (int j = 0; j < F.n_cs; j++)
@@ -1275,7 +1588,7 @@ static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymS
     for (size_t b = 0; b < nb && F.ok; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         MLIR_BlockHandle next_bk = (b + 1 < nb) ? MLIR_GetRegionBlock(ctx, reg, b + 1) : MLIR_INVALID_HANDLE;
-        F.block_off[b] = here(&F);
+        x64_emit1(&F, OP_TYPE_X64_LABEL, (int64_t)b);
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         // Check for fusable `icmp [-> select(1,0) -> icmp ne/eq 0] -> cond_br` at block tail,
         // skipping any rematerialized constant ops in between (which emit no code).
@@ -1352,12 +1665,10 @@ static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymS
         }
     }
 
-    // --- patch intra-function branch rel32s ---
-    for (size_t i = 0; i < F.n_fix; i++) {
-        int tb = F.fix[i].target_block;
-        uint32_t fld = F.fix[i].field_off;
-        int32_t rel = (int32_t)F.block_off[tb] - (int32_t)(fld + 4);
-        buf_patch_le32(&f->code, fld, (uint32_t)rel);
+    // --- encode x64.* MLIR block to x86_64 machine bytes (unless retaining IR) ---
+    if (retain_blk == MLIR_INVALID_HANDLE) {
+        if (F.ok) x64_encode_block(&F, x64_blk, (size_t)F.x64_next_label);
+        MLIR_ResetBlockToCheckpoint(ctx, x64_blk, x64_op_cp);
     }
 
     if (!F.ok) g_x64_ok = false;
@@ -1365,6 +1676,10 @@ static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymS
 
     vmap_free(&F.slots);
     if (g_x64_times) g_x64_times->isel_encode_ns += x64_clock() - t_isel;
+}
+
+static void emit_func_into(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f, SymSet *refs) {
+    emit_func_to_x64(ctx, fn, f, refs, MLIR_INVALID_HANDLE);
 }
 
 static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet *refs) {
@@ -2269,4 +2584,64 @@ bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
     g_x64_mb = MLIR_INVALID_HANDLE;
     g_x64_data_buf = NULL;
     return ok;
+}
+
+MLIR_OpHandle mlir_llvm_to_x64_mlir(MLIR_Context *ctx, MLIR_OpHandle llvm_module) {
+    g_x64_ok = true;
+    g_x64_wasm_lifted = false;
+
+    MLIR_RegionHandle mreg = MLIR_GetOpRegion(ctx, llvm_module, 0);
+    MLIR_BlockHandle  mb   = MLIR_GetRegionBlock(ctx, mreg, 0);
+    g_x64_mb = mb;
+
+    GMap gm; memset(&gm, 0, sizeof(gm));
+    Buf data = {0};
+    g_x64_data_buf = &data;
+    X64PtrReloc *ptr_relocs = NULL;
+    size_t n_ptr_relocs = 0;
+    x64_init_data_section(ctx, mb, &gm, &data, NULL, false, &ptr_relocs, &n_ptr_relocs);
+    g_x64_gmap = &gm;
+
+    MLIR_RegionHandle x64_mreg = MLIR_CreateRegion(ctx);
+    MLIR_BlockHandle x64_mb = MLIR_CreateBlock(ctx);
+    MLIR_AppendRegionBlock(ctx, x64_mreg, x64_mb);
+    MLIR_OpSpec mspec = {0};
+    mspec.type = OP_TYPE_MODULE;
+    mspec.regions = &x64_mreg;
+    mspec.n_regions = 1;
+    MLIR_OpHandle x64_mod = MLIR_CreateOpFromSpec(ctx, &mspec);
+    MLIR_ReserveOps(ctx, (size_t)MLIR_GetOpCheckpoint(ctx) * 3 + 256);
+
+    size_t no = MLIR_GetBlockNumOps(ctx, mb);
+    for (size_t i = 0; i < no && g_x64_ok; i++) {
+        MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
+        if (MLIR_GetOpNumRegions(ctx, fn) == 0 ||
+            MLIR_GetRegionNumBlocks(ctx, MLIR_GetOpRegion(ctx, fn, 0)) == 0) continue;
+        string fname = attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
+        MLIR_RegionHandle fn_reg = MLIR_CreateRegion(ctx);
+        MLIR_BlockHandle fn_blk = MLIR_CreateBlock(ctx);
+        MLIR_AppendRegionBlock(ctx, fn_reg, fn_blk);
+        MLIR_NamedAttr attrs[1] = {
+            MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, fname))
+        };
+        MLIR_OpSpec fspec = {0};
+        fspec.type = OP_TYPE_X64_FUNC;
+        fspec.attrs = attrs;
+        fspec.n_attrs = 1;
+        fspec.regions = &fn_reg;
+        fspec.n_regions = 1;
+        MLIR_OpHandle xfn = MLIR_CreateOpFromSpec(ctx, &fspec);
+        MLIR_AppendBlockOp(ctx, x64_mb, xfn);
+        emit_func_to_x64(ctx, fn, NULL, NULL, fn_blk);
+    }
+
+    bool ok = g_x64_ok;
+    free(data.data);
+    gmap_free(&gm);
+    free(ptr_relocs);
+    g_x64_gmap = NULL;
+    g_x64_mb = MLIR_INVALID_HANDLE;
+    g_x64_data_buf = NULL;
+    return ok ? x64_mod : MLIR_INVALID_HANDLE;
 }

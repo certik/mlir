@@ -731,6 +731,15 @@ static int driver_emit_native_x64(MLIR_Context *ctx, MLIR_OpHandle module,
     out->size = code_size;
     return 0;
 }
+
+static int driver_emit_native_x64_mlir(MLIR_Context *ctx, MLIR_OpHandle module,
+                                       string *out) {
+    MLIR_OpHandle x64_mod = mlir_llvm_to_x64_mlir(ctx, module);
+    if (x64_mod == MLIR_INVALID_HANDLE)
+        return 1;
+    *out = MLIR_PrintOperationGeneric(ctx, x64_mod);
+    return 0;
+}
 #else
 static void driver_run_llvm_opt_passes(MLIR_Context *ctx, MLIR_OpHandle llvm_mod) {
     MLIR_Pass p;
@@ -803,6 +812,17 @@ static int driver_emit_native_x64(MLIR_Context *ctx, MLIR_OpHandle module,
     (void)out;
     fprintf(stderr,
             "tinyc: --emit=x64 is not supported in this build "
+            "(rebuild with TINYC_ENABLE_ELF=1 or on Linux/x86_64)\n");
+    return 1;
+}
+
+static int driver_emit_native_x64_mlir(MLIR_Context *ctx, MLIR_OpHandle module,
+                                       string *out) {
+    (void)ctx;
+    (void)module;
+    (void)out;
+    fprintf(stderr,
+            "tinyc: --emit=x64-mlir is not supported in this build "
             "(rebuild with TINYC_ENABLE_ELF=1 or on Linux/x86_64)\n");
     return 1;
 }
@@ -1062,6 +1082,9 @@ typedef enum {
     // writes the raw concatenated machine code: a per-translation-unit
     // compile for benchmarking until the backend can write object files.
     EMIT_X64,
+    // `--emit=x64-mlir` stops the unified llvm -> x64.* -> ELF backend at the
+    // `x64.*` target dialect and prints it in generic MLIR syntax.
+    EMIT_X64_MLIR,
     EMIT_N_MODES
 } EmitMode;
 
@@ -1081,6 +1104,7 @@ static const char *emit_mode_name(EmitMode m) {
         case EMIT_MACHO:     return "macho";
         case EMIT_ELF:       return "elf";
         case EMIT_X64:       return "x64";
+        case EMIT_X64_MLIR:  return "x64-mlir";
         default:             return "";
     }
 }
@@ -1402,6 +1426,7 @@ static int tinyc_main(void) {
     bool emit_macho     = emit_mode == EMIT_MACHO;
     bool emit_elf       = emit_mode == EMIT_ELF;
     bool emit_x64       = emit_mode == EMIT_X64;
+    bool emit_x64_mlir  = emit_mode == EMIT_X64_MLIR;
 
     if ((emit_wasmssa || emit_wasmstack) &&
 #ifdef TINYC_HAS_UPSTREAM
@@ -1710,7 +1735,7 @@ static int tinyc_main(void) {
     Arena *fe_arena = arena_create(4 * 1024 * 1024 - 4096);
     string *all_defines = arena_new_array(fe_arena, string, n_defines + 16);
     size_t n_all_defines = driver_append_target_defines(
-        all_defines, target_wasm32, emit_elf, emit_x64,
+        all_defines, target_wasm32, emit_elf, emit_x64 || emit_x64_mlir,
         emit_aarch64, emit_macho, macho_backend_llvm, target);
     for (size_t k = 0; k < n_defines; k++) all_defines[n_all_defines++] = defines[k];
     Program *prog = arena_new(fe_arena, Program);
@@ -1813,14 +1838,14 @@ static int tinyc_main(void) {
     // to SSA in emit.c, so skipping mem2reg matches clang -O0 and avoids
     // redundant SSA construction + edge-copy overhead.
     uint64_t t_m2r = ts_now();
-    bool skip_m2r_x64 = (emit_x64 || emit_elf) &&
+    bool skip_m2r_x64 = (emit_x64 || emit_x64_mlir || emit_elf) &&
                         !getenv("TINYC_X64_GLOBAL_RA") &&
                         !getenv("TINYC_FORCE_MEM2REG");
     if (!skip_m2r_x64 && !getenv("TINYC_NO_MEM2REG"))
         mlir_llvm_mem2reg_ex(ctx, module, true);
     ts_add(TS_MEM2REG, t_m2r);
 
-    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf || emit_x64) {
+    if (emit_lowered || emit_llvm || emit_wasm || emit_wasmssa || emit_wasmstack || emit_wat || emit_macho || emit_aarch64 || emit_elf || emit_x64 || emit_x64_mlir) {
         // One lowering for every backend: the result is LLVM dialect only,
         // with control flow as a flat llvm.br / llvm.cond_br CFG. The wasm
         // backend rebuilds structured control flow from it internally.
@@ -1985,6 +2010,14 @@ static int tinyc_main(void) {
         t_cg = 0;
     } else if (emit_x64) {
         if (driver_emit_native_x64(ctx, module, &out) != 0) {
+            arena_destroy(arena);
+            MLIR_DestroyContext(ctx);
+            arena_destroy(boot_arena);
+            return 1;
+        }
+        t_cg = 0;
+    } else if (emit_x64_mlir) {
+        if (driver_emit_native_x64_mlir(ctx, module, &out) != 0) {
             arena_destroy(arena);
             MLIR_DestroyContext(ctx);
             arena_destroy(boot_arena);
