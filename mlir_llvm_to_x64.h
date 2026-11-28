@@ -60,6 +60,9 @@ typedef struct MLIR_X64StageTimes {
 } MLIR_X64StageTimes;
 void mlir_llvm_to_x64_set_stage_times(MLIR_X64StageTimes *t);
 
+// Optimization level (0 = -O0 fast block-local RA, 1+ = -O1/-O2 global RA + opts).
+void mlir_llvm_to_x64_set_opt_level(int level);
+
 #ifdef __cplusplus
 }
 #endif

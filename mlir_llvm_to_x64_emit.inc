@@ -473,20 +473,125 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
     return false;
 }
 
-// emit parallel-move-safe edge copies for the `si`-th successor of `term`
+// Recover a value's home (physical reg or rbp-relative stack slot) for parallel-move
+// resolution in emit_edge(). Rematerialized constants/addressof return reg=-1, slot=0.
+static void x64_val_home(FnCtx *F, MLIR_ValueHandle v, bool is_src,
+                         int *out_reg, int32_t *out_slot) {
+    *out_reg = -1;
+    *out_slot = 0;
+    if (is_src && !F->fast_ra) {
+        MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
+        if (def != MLIR_INVALID_HANDLE && x64_is_remat_type(MLIR_GetOpType(F->ctx, def)))
+            return;
+    }
+    uint8_t rH;
+    if (val_in_reg(F, v, &rH)) { *out_reg = (int)rH; return; }
+    int32_t slot;
+    if (F->has_spill && sm_get_fast(&F->spill, v, &slot)) {
+        *out_slot = (slot + 1) * 8;
+        return;
+    }
+    if (vmap_get(&F->slots, v, &slot)) { *out_slot = slot; return; }
+}
+
+// Emit parallel-move-safe edge copies for the `si`-th successor of `term`.
+// Resolves register-to-register and register/slot copies directly without
+// spilling to [rbp - edge_tmp], dropping self-copies and breaking cycles via R11.
 static void emit_edge(FnCtx *F, MLIR_OpHandle term, size_t si, MLIR_BlockHandle target) {
     size_t n = MLIR_GetOpNumSuccessorOperands(F->ctx, term, si);
-    // pass 1: sources -> temp staging area
-    for (size_t i = 0; i < n; i++) {
-        MLIR_ValueHandle src = MLIR_GetOpSuccessorOperand(F->ctx, term, si, i);
-        load_val(F, src, RAX);
-        store_rbp(F, (int32_t)(F->edge_tmp - i * 8), RAX, 1);
+    if (n == 0) return;
+    if (n > 64) {
+        // Fallback for unusually wide edges (> 64 block args).
+        for (size_t i = 0; i < n; i++) {
+            MLIR_ValueHandle src = MLIR_GetOpSuccessorOperand(F->ctx, term, si, i);
+            load_val(F, src, RAX);
+            store_rbp(F, (int32_t)(F->edge_tmp - i * 8), RAX, 1);
+        }
+        for (size_t i = 0; i < n; i++) {
+            MLIR_ValueHandle darg = MLIR_GetBlockArg(F->ctx, target, i);
+            load_rbp(F, RAX, (int32_t)(F->edge_tmp - i * 8), 1);
+            store_val(F, darg, RAX);
+        }
+        return;
     }
-    // pass 2: temps -> destination block-arg homes (register or slot)
+
+    MLIR_ValueHandle src_v[64];
+    int     src_r[64], dst_r[64];
+    int32_t src_s[64], dst_s[64];
+    int     mv_w[64];
+    uint8_t done[64];
+    size_t  rem = 0;
+
     for (size_t i = 0; i < n; i++) {
-        MLIR_ValueHandle darg = MLIR_GetBlockArg(F->ctx, target, i);
-        load_rbp(F, RAX, (int32_t)(F->edge_tmp - i * 8), 1);
-        store_val(F, darg, RAX);
+        MLIR_ValueHandle sv = MLIR_GetOpSuccessorOperand(F->ctx, term, si, i);
+        MLIR_ValueHandle dv = MLIR_GetBlockArg(F->ctx, target, i);
+        src_v[i] = sv;
+        x64_val_home(F, sv, true,  &src_r[i], &src_s[i]);
+        x64_val_home(F, dv, false, &dst_r[i], &dst_s[i]);
+        mv_w[i] = val_w(F->ctx, dv);
+        if ((src_r[i] >= 0 && src_r[i] == dst_r[i]) ||
+            (src_s[i] > 0  && src_s[i] == dst_s[i])) {
+            done[i] = 1;
+        } else {
+            done[i] = 0;
+            rem++;
+        }
+    }
+
+    while (rem > 0) {
+        bool progress = false;
+        for (size_t i = 0; i < n; i++) {
+            if (done[i]) continue;
+            // Ready iff no other pending move reads our destination.
+            bool blocked = false;
+            for (size_t j = 0; j < n; j++) {
+                if (done[j] || j == i) continue;
+                if ((dst_r[i] >= 0 && src_r[j] == dst_r[i]) ||
+                    (dst_s[i] > 0  && src_s[j] == dst_s[i])) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked) continue;
+
+            int w = mv_w[i];
+            if (src_r[i] >= 0) {
+                if (dst_r[i] >= 0) mov_rr(F, (uint8_t)dst_r[i], (uint8_t)src_r[i], w);
+                else               store_rbp(F, dst_s[i], (uint8_t)src_r[i], w);
+            } else {
+                if (dst_r[i] >= 0) {
+                    load_val_w(F, src_v[i], (uint8_t)dst_r[i], w);
+                } else {
+                    load_val_w(F, src_v[i], RAX, w);
+                    store_rbp(F, dst_s[i], RAX, w);
+                }
+            }
+            done[i] = 1;
+            rem--;
+            progress = true;
+        }
+        if (!progress) {
+            // Pure cycle: save one pending destination into R11 (outside pool)
+            // and redirect all pending reads of it to R11.
+            size_t k = 0;
+            while (k < n && done[k]) k++;
+            if (dst_r[k] >= 0) {
+                int saved_r = dst_r[k];
+                mov_rr(F, R11, (uint8_t)saved_r, 1);
+                for (size_t j = 0; j < n; j++) {
+                    if (!done[j] && src_r[j] == saved_r) src_r[j] = R11;
+                }
+            } else {
+                int32_t saved_s = dst_s[k];
+                load_rbp(F, R11, saved_s, 1);
+                for (size_t j = 0; j < n; j++) {
+                    if (!done[j] && src_s[j] == saved_s) {
+                        src_r[j] = R11;
+                        src_s[j] = 0;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -507,8 +612,10 @@ static Buf *g_x64_data_buf = NULL;           // -> stack Buf in mlir_llvm_to_elf
 static bool  g_x64_ok = true;
 // --time-stages sink (mlir_llvm_to_x64_set_stage_times); NULL = no timing.
 static MLIR_X64StageTimes *g_x64_times = NULL;
+static int g_x64_opt_level = 0;
 
 void mlir_llvm_to_x64_set_stage_times(MLIR_X64StageTimes *t) { g_x64_times = t; }
+void mlir_llvm_to_x64_set_opt_level(int level) { g_x64_opt_level = level; }
 
 static uint64_t x64_clock(void) { return g_x64_times ? platform_clock_ns() : 0; }
 
@@ -582,12 +689,22 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) &&
             imm >= INT32_MIN && imm <= INT32_MAX) {
             uint8_t dst = has_rD ? rD : RAX;
-            load_val_w(F, a0, dst, w);
-            alu_ri(F, ext, dst, (int32_t)imm, w);
+            if (ty == OP_TYPE_LLVM_AND && imm == 0) {
+                mov_ri(F, dst, 0, w);
+            } else {
+                load_val_w(F, a0, dst, w);
+                if (imm != 0 || ty == OP_TYPE_LLVM_AND)
+                    alu_ri(F, ext, dst, (int32_t)imm, w);
+            }
             if (!has_rD) store_val_w(F, r, dst, w);
             return;
         }
         uint8_t r1 = val_reg_or_load(F, a1, RCX, w);
+        if (has_rD && rD == r1 && ty != OP_TYPE_LLVM_SUB) {
+            uint8_t r0 = val_reg_or_load(F, a0, RAX, w);
+            alu_rr(F, opc, rD, r0, w);
+            return;
+        }
         uint8_t dst = (has_rD && rD != r1) ? rD : RAX;
         load_val_w(F, a0, dst, w);
         alu_rr(F, opc, dst, r1, w);
@@ -604,13 +721,31 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         int64_t imm;
         if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &imm) &&
             imm >= INT32_MIN && imm <= INT32_MAX) {
-            uint8_t s0 = val_reg_or_load(F, a0, RAX, w);
             uint8_t dst = has_rD ? rD : RAX;
-            imul_ri(F, dst, s0, (int32_t)imm, w);
+            if (imm == 0) {
+                mov_ri(F, dst, 0, w);
+            } else if (imm == 1) {
+                load_val_w(F, a0, dst, w);
+            } else if (imm > 1 && ((uint64_t)imm & ((uint64_t)imm - 1)) == 0) {
+                int sh = 0;
+                uint64_t u = (uint64_t)imm;
+                while ((u >>= 1) != 0) sh++;
+                load_val_w(F, a0, dst, w);
+                x64_emit1(F, OP_TYPE_X64_SHIFT_IMM,
+                          (int64_t)dst | (4ll << 4) | ((int64_t)w << 8) | ((int64_t)sh << 12));
+            } else {
+                uint8_t s0 = val_reg_or_load(F, a0, RAX, w);
+                imul_ri(F, dst, s0, (int32_t)imm, w);
+            }
             if (!has_rD) store_val_w(F, r, dst, w);
             return;
         }
         uint8_t r1 = val_reg_or_load(F, a1, RCX, w);
+        if (has_rD && rD == r1) {
+            uint8_t r0 = val_reg_or_load(F, a0, RAX, w);
+            imul_rr(F, rD, r0, w);
+            return;
+        }
         uint8_t dst = (has_rD && rD != r1) ? rD : RAX;
         load_val_w(F, a0, dst, w);
         imul_rr(F, dst, r1, w);
@@ -812,7 +947,15 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     int bits = (ib == 32) ? 32 : (ib == 16) ? 16 : 8;
                     x64_emit1(F, OP_TYPE_X64_MOVSX, (int64_t)RCX | ((int64_t)RCX << 4) | ((int64_t)bits << 8));
                 }
-                if (stride != 1) imul_ri(F, RCX, RCX, (int32_t)stride, 1);  // rcx *= stride
+                if (stride > 1 && (stride & (stride - 1)) == 0) {
+                    int sh = 0;
+                    unsigned u = stride;
+                    while ((u >>= 1) != 0) sh++;
+                    x64_emit1(F, OP_TYPE_X64_SHIFT_IMM,
+                              (int64_t)RCX | (4ll << 4) | (1ll << 8) | ((int64_t)sh << 12));
+                } else if (stride != 1) {
+                    imul_ri(F, RCX, RCX, (int32_t)stride, 1);  // rcx *= stride
+                }
                 alu_rr(F, 0x01, RAX, RCX, 1);              // add rax, rcx
             } else if (ci != 0) {
                 add_const_off(F, RAX, (int64_t)ci * (int64_t)stride);
@@ -1437,7 +1580,7 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
     uint64_t t_ra = x64_clock();
     if (x64_ra_mode != 3) {
         RegTarget T = x64_regtarget();
-        bool use_fast = (x64_ra_mode == 1 && !F.wasm_lifted);
+        bool use_fast = (x64_ra_mode == 1 && g_x64_opt_level == 0 && !F.wasm_lifted);
         uint32_t um = use_fast
             ? mlir_regalloc_fast(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T)
             : mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);

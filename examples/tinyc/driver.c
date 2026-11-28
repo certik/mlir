@@ -1164,6 +1164,7 @@ static int tinyc_main(void) {
     // --target TRIPLE (see Target above); only `--emit=llvm` consults it.
     Target target;
     target_set_default(&target);
+    int opt_level = 0;
 
     // Multiple positional input files (multi-file compilation merges them
     // into a single Program / single MLIR module).
@@ -1393,6 +1394,10 @@ static int tinyc_main(void) {
         else if (strcmp(argv[i], "--time-stages") == 0) {
             // Handled by the pre-scan above.
         }
+        else if (strcmp(argv[i], "-O0") == 0) { opt_level = 0; }
+        else if (strcmp(argv[i], "-O1") == 0 || strcmp(argv[i], "-O") == 0) { opt_level = 1; }
+        else if (strcmp(argv[i], "-O2") == 0) { opt_level = 2; }
+        else if (strcmp(argv[i], "-O3") == 0) { opt_level = 3; }
         else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
             include_dirs[n_include_dirs++] = str_from_cstr_view(argv[i] + 2);
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
@@ -1839,6 +1844,7 @@ static int tinyc_main(void) {
     // redundant SSA construction + edge-copy overhead.
     uint64_t t_m2r = ts_now();
     bool skip_m2r_x64 = (emit_x64 || emit_x64_mlir || emit_elf) &&
+                        opt_level == 0 &&
                         !getenv("TINYC_X64_GLOBAL_RA") &&
                         !getenv("TINYC_FORCE_MEM2REG");
     if (!skip_m2r_x64 && !getenv("TINYC_NO_MEM2REG"))
@@ -1857,6 +1863,26 @@ static int tinyc_main(void) {
             return 1;
         }
         ts_add(TS_LOWER, t_lo);
+        bool run_native_opts = opt_level >= 1 &&
+#ifdef TINYC_HAS_UPSTREAM
+            !use_upstream;
+#else
+            true;
+#endif
+        if (run_native_opts) {
+            uint64_t t_lcse = ts_now();
+            mlir_llvm_load_cse(ctx, module);
+            ts_add(TS_LOAD_CSE, t_lcse);
+            uint64_t t_gvn = ts_now();
+            mlir_llvm_arith_gvn(ctx, module);
+            ts_add(TS_ARITH_GVN, t_gvn);
+            uint64_t t_dce = ts_now();
+            mlir_llvm_dce(ctx, module);
+            ts_add(TS_DCE, t_dce);
+        }
+#ifdef TINYC_HAS_ELF
+        mlir_llvm_to_x64_set_opt_level(opt_level);
+#endif
         if (getenv("TINYC_DUMP_LOWERED")) {
             string s = MLIR_PrintOperationGeneric(ctx, module);
             println(str_lit("{}"), s);
