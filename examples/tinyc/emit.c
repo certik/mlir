@@ -220,6 +220,8 @@ typedef struct {
     Sym             *globals;        // module-scope symbols
 
     bool             need_syscall6_stub;   // emit @__tinyc_syscall6 extern decl
+    bool             need_setjmp_stub;     // emit @__tinyc_setjmp extern decl
+    bool             need_longjmp_stub;    // emit @__tinyc_longjmp extern decl
     int              cur_line;       // last AST node line entered; used by
                                      // EMIT_ERR for diagnostic line numbers.
     int              err_count;      // count of EMIT_ERR diagnostics
@@ -5023,6 +5025,46 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             // primitive corec's platform_*.c builds raw syscalls from; it has
             // meaning only for native targets (there are no raw syscalls on
             // wasm — use the WASI platform there).
+            // Built-in __builtin_setjmp(buf) / __builtin_longjmp(buf, val):
+            // lower to @__tinyc_setjmp(!llvm.ptr)->i32 and
+            // @__tinyc_longjmp(!llvm.ptr, i32)->void, synthesized by the
+            // native x86_64/ELF backend (#337).
+            if (callee_c0 == '_' && str_eq(ex->name, str_lit("__builtin_setjmp"))) {
+                if (ex->extra->args.size != 1) {
+                    EMIT_ERR(e, "__builtin_setjmp expects 1 argument (jmp_buf)");
+                    r.val = emit_const_i32(e, 0); return r;
+                }
+                e->need_setjmp_stub = true;
+                EVal bv = emit_expr(e, sc, ex->extra->args.data[0]);
+                MLIR_ValueHandle ops[1] = { coerce_eval_to(e, bv, e->ptr, (Type){0}) };
+                MLIR_ValueHandle res = MLIR_INVALID_HANDLE;
+                MLIR_TypeHandle rts[1] = { e->i32 };
+                MLIR_NamedAttr as[1] = {
+                    MLIR_Named(MLIR_KEY_CALLEE,
+                               MLIR_CreateAttributeSymbolRef(e->ctx, str_lit("__tinyc_setjmp")))
+                };
+                emit_op(e, OP_TYPE_FUNC_CALL, rts, 1, &res, 1, ops, 1, as, 1, NULL, 0);
+                r.val = res; return r;
+            }
+            if (callee_c0 == '_' && str_eq(ex->name, str_lit("__builtin_longjmp"))) {
+                if (ex->extra->args.size != 2) {
+                    EMIT_ERR(e, "__builtin_longjmp expects 2 arguments (jmp_buf, val)");
+                    r.val = emit_const_i32(e, 0); return r;
+                }
+                e->need_longjmp_stub = true;
+                EVal bv = emit_expr(e, sc, ex->extra->args.data[0]);
+                EVal vv = emit_expr(e, sc, ex->extra->args.data[1]);
+                MLIR_ValueHandle ops[2] = {
+                    coerce_eval_to(e, bv, e->ptr, (Type){0}),
+                    coerce_eval_to(e, vv, e->i32, (Type){0}),
+                };
+                MLIR_NamedAttr as[1] = {
+                    MLIR_Named(MLIR_KEY_CALLEE,
+                               MLIR_CreateAttributeSymbolRef(e->ctx, str_lit("__tinyc_longjmp")))
+                };
+                emit_op(e, OP_TYPE_FUNC_CALL, NULL, 0, NULL, 0, ops, 2, as, 1, NULL, 0);
+                r.val = emit_const_i32(e, 0); return r;
+            }
             if (callee_c0 == '_' && str_eq(ex->name, str_lit("__builtin_syscall6"))) {
                 if (ex->extra->args.size != 7) {
                     EMIT_ERR(e, "__builtin_syscall6 expects 7 arguments (num + 6)");
@@ -8486,6 +8528,39 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         decl_spec.loc = e.loc;
         MLIR_OpHandle decl = MLIR_CreateOpFromSpec(ctx, &decl_spec);
         MLIR_AppendBlockOp(ctx, mb, decl);
+    }
+
+    if (e.need_setjmp_stub) {
+        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 1); ins[0] = e.ptr;
+        MLIR_TypeHandle *outs = arena_new_array(arena, MLIR_TypeHandle, 1); outs[0] = e.i32;
+        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 1, outs, 1);
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
+        attrs[0] = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("__tinyc_setjmp")));
+        attrs[1] = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
+        attrs[2] = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
+        MLIR_OpSpec decl_spec = {0};
+        decl_spec.type = OP_TYPE_FUNC_FUNC;
+        decl_spec.attrs = attrs;
+        decl_spec.n_attrs = 3;
+        decl_spec.n_regions = 1;
+        decl_spec.loc = e.loc;
+        MLIR_AppendBlockOp(ctx, mb, MLIR_CreateOpFromSpec(ctx, &decl_spec));
+    }
+    if (e.need_longjmp_stub) {
+        MLIR_TypeHandle *ins = arena_new_array(arena, MLIR_TypeHandle, 2);
+        ins[0] = e.ptr; ins[1] = e.i32;
+        MLIR_TypeHandle fty = MLIR_CreateTypeFunction(ctx, ins, 2, NULL, 0);
+        MLIR_NamedAttr *attrs = arena_new_array(arena, MLIR_NamedAttr, 3);
+        attrs[0] = MLIR_Named(MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(ctx, str_lit("__tinyc_longjmp")));
+        attrs[1] = MLIR_Named(MLIR_KEY_FUNCTION_TYPE, MLIR_CreateAttributeType(ctx, fty));
+        attrs[2] = MLIR_Named(MLIR_KEY_SYM_VISIBILITY, MLIR_CreateAttributeString(ctx, str_lit("private")));
+        MLIR_OpSpec decl_spec = {0};
+        decl_spec.type = OP_TYPE_FUNC_FUNC;
+        decl_spec.attrs = attrs;
+        decl_spec.n_attrs = 3;
+        decl_spec.n_regions = 1;
+        decl_spec.loc = e.loc;
+        MLIR_AppendBlockOp(ctx, mb, MLIR_CreateOpFromSpec(ctx, &decl_spec));
     }
 
     // Emit any string-literal globals collected by EX_STR.

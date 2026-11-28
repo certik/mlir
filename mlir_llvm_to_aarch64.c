@@ -3702,6 +3702,73 @@ static MLIR_OpHandle synth_start(MLIR_Context *ctx, string main_name,
     return MLIR_CreateOpFromSpec(ctx, &spec);
 }
 
+// Synthesize `@__tinyc_setjmp(ptr buf) -> i32` and `@__tinyc_longjmp(ptr buf, i32 val)`.
+// Layout in `buf` (21 * 8 = 168 bytes; jmp_buf[22] = 176 bytes):
+//   [0..11]  x19..x30  (offsets 0..88)
+//   [12]     sp        (offset 96)
+//   [13..20] d8..d15   (offsets 104..160)
+static MLIR_OpHandle synth_setjmp(MLIR_Context *ctx) {
+    MLIR_BlockHandle blk = MLIR_CreateBlock(ctx);
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, blk);
+
+    for (uint8_t r = 19; r <= 30; r++)
+        emit_str_x(ctx, blk, r, 0, (int32_t)((r - 19) * 8));
+    // x9 = sp; [x0 + 96] = x9
+    emit_add_imm(ctx, blk, 9, 31, 0, true);
+    emit_str_x(ctx, blk, 9, 0, 96);
+    for (uint8_t d = 8; d <= 15; d++) {
+        emit_fmov_gp_v(ctx, blk, false, true, 9, d);
+        emit_str_x(ctx, blk, 9, 0, (int32_t)(104 + (d - 8) * 8));
+    }
+    emit_movz(ctx, blk, 0, 0, 0, false);
+    emit_ret(ctx, blk);
+
+    MLIR_NamedAttr attrs[2];
+    attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, "__tinyc_setjmp", 14);
+    attrs[1] = attr_b(ctx, MLIR_KEY_EXPORTED, false);
+    MLIR_RegionHandle regs[1] = { reg };
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_AARCH64_FUNC;
+    spec.attrs = attrs;
+    spec.n_attrs = 2;
+    spec.regions = regs;
+    spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
+}
+
+static MLIR_OpHandle synth_longjmp(MLIR_Context *ctx) {
+    MLIR_BlockHandle blk = MLIR_CreateBlock(ctx);
+    MLIR_RegionHandle reg = MLIR_CreateRegion(ctx);
+    MLIR_AppendRegionBlock(ctx, reg, blk);
+
+    for (uint8_t r = 19; r <= 30; r++)
+        emit_ldr_x(ctx, blk, r, 0, (int32_t)((r - 19) * 8));
+    emit_ldr_x(ctx, blk, 9, 0, 96);
+    emit_add_imm(ctx, blk, 31, 9, 0, true);
+    for (uint8_t d = 8; d <= 15; d++) {
+        emit_ldr_x(ctx, blk, 9, 0, (int32_t)(104 + (d - 8) * 8));
+        emit_fmov_gp_v(ctx, blk, true, true, d, 9);
+    }
+    // w0 = (w1 == 0) ? 1 : w1  (cond 0 = EQ)
+    emit_cmp_imm(ctx, blk, 1, 0, false);
+    emit_movz(ctx, blk, 2, 1, 0, false);
+    emit_csel(ctx, blk, 0, 2, 1, 0, false);
+    emit_ret(ctx, blk);
+
+    MLIR_NamedAttr attrs[2];
+    attrs[0] = attr_s(ctx, MLIR_KEY_SYM_NAME, "__tinyc_longjmp", 15);
+    attrs[1] = attr_b(ctx, MLIR_KEY_EXPORTED, false);
+    MLIR_RegionHandle regs[1] = { reg };
+    MLIR_OpSpec spec = {0};
+    spec.type = OP_TYPE_AARCH64_FUNC;
+    spec.attrs = attrs;
+    spec.n_attrs = 2;
+    spec.regions = regs;
+    spec.n_regions = 1;
+    return MLIR_CreateOpFromSpec(ctx, &spec);
+}
+
 // ---------------------------------------------------------------------------
 // Input guard. The aarch64 backend takes LLVM-dialect input only (see the file
 // header). Reject, naming the offending op, anything that is not an `llvm.*`
@@ -3812,6 +3879,11 @@ MLIR_OpHandle mlir_llvm_to_aarch64(MLIR_Context *ctx,
                     "instead\n");
                 free(gm.e); free(gblob); free(grelocs);
                 return MLIR_INVALID_HANDLE;
+            }
+            if (sym.size == 14 && memcmp(sym.str, "__tinyc_setjmp", 14) == 0) {
+                MLIR_AppendBlockOp(ctx, out_body, synth_setjmp(ctx));
+            } else if (sym.size == 15 && memcmp(sym.str, "__tinyc_longjmp", 15) == 0) {
+                MLIR_AppendBlockOp(ctx, out_body, synth_longjmp(ctx));
             }
             continue;
         }

@@ -1,0 +1,29 @@
+extern int printf(const char *fmt, ...);
+
+static long g_env[8];
+
+static void deep(int level, int val) {
+    if (level > 0) {
+        deep(level - 1, val);
+    } else {
+        __builtin_longjmp(g_env, val);
+    }
+}
+
+int main(void) {
+    int r = __builtin_setjmp(g_env);
+    if (r == 0) {
+        printf("first\n");
+        deep(5, 42);
+    } else {
+        printf("caught %d\n", r);
+    }
+
+    int r2 = __builtin_setjmp(g_env);
+    if (r2 == 0) {
+        deep(3, 0); // 0 must become 1 per C11 7.13.2.1
+    } else {
+        printf("zero-becomes %d\n", r2);
+    }
+    return 0;
+}
