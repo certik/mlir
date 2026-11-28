@@ -5691,8 +5691,44 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                     }
                     if (!ch) break;
                 }
+                // Greedy single-predecessor forward fallthrough trace for non-cold blocks:
+                // pulls single-pred forward targets (e.g. `if (tail) tail->next = e`,
+                // diamond arms) immediately after their predecessor to eliminate `jmp`s.
+                uint8_t *placed = (uint8_t *)calloc(nb, 1);
                 size_t p = 0;
-                for (size_t b = 0; b < nb; b++) if (!is_cold[b]) blk_order[p++] = b;
+                if (placed) {
+                    for (size_t seed = 0; seed < nb; seed++) {
+                        if (is_cold[seed] || placed[seed]) continue;
+                        size_t cur = seed;
+                        while (cur < nb && !is_cold[cur] && !placed[cur]) {
+                            placed[cur] = 1;
+                            blk_order[p++] = cur;
+                            MLIR_BlockHandle cbk = MLIR_GetRegionBlock(ctx, reg, cur);
+                            size_t cno = MLIR_GetBlockNumOps(ctx, cbk);
+                            if (cno == 0) break;
+                            MLIR_OpHandle cterm = MLIR_GetBlockOp(ctx, cbk, cno - 1);
+                            size_t cns = MLIR_GetOpNumSuccessors(ctx, cterm);
+                            size_t nxt = nb;
+                            for (size_t si = 0; si < cns; si++) {
+                                uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, cterm, si);
+                                size_t hs = (sk * 1099511628211ull) & jbh_mask;
+                                int32_t ti = -1;
+                                while (jbh_k[hs]) {
+                                    if (jbh_k[hs] == sk) { ti = jbh_v[hs]; break; }
+                                    hs = (hs + 1) & jbh_mask;
+                                }
+                                if (ti > (int32_t)cur && !is_cold[ti] && !placed[ti] && pred_cnt[ti] == 1) {
+                                    nxt = (size_t)ti;
+                                    break; // prefer true arm (si==0) when both are single-pred forward
+                                }
+                            }
+                            cur = nxt;
+                        }
+                    }
+                    free(placed);
+                } else {
+                    for (size_t b = 0; b < nb; b++) if (!is_cold[b]) blk_order[p++] = b;
+                }
                 for (size_t b = 0; b < nb; b++) if (is_cold[b])  blk_order[p++] = b;
             } else {
                 free(blk_order); blk_order = NULL;
