@@ -2120,8 +2120,7 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         if (hno < 2 || hno > 4) continue;
         MLIR_OpHandle hterm = MLIR_GetBlockOp(ctx, hblk, hno - 1);
         if (MLIR_GetOpType(ctx, hterm) != OP_TYPE_LLVM_COND_BR) continue;
-        if (MLIR_GetOpNumSuccessorOperands(ctx, hterm, 0) != 0 ||
-            MLIR_GetOpNumSuccessorOperands(ctx, hterm, 1) != 0) continue;
+        if (MLIR_GetOpNumSuccessorOperands(ctx, hterm, 0) != 0) continue;
 
         // Header must have only constants + 1 icmp(iv, lim_const) + cond_br.
         MLIR_ValueHandle cond = MLIR_GetOpOperand(ctx, hterm, 0);
@@ -2142,9 +2141,14 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         if (pred != 2 && pred != 3) continue; // slt or sle
 
         MLIR_ValueHandle iv = MLIR_GetOpOperand(ctx, icmp, 0);
-        int64_t lim_c = 0; uint32_t iv_w = 0;
-        if (!cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, icmp, 1), &lim_c, &iv_w)) continue;
-        lim_c = cf_sext(lim_c, iv_w);
+        MLIR_ValueHandle lim_v = MLIR_GetOpOperand(ctx, icmp, 1);
+        MLIR_TypeHandle iv_ty = MLIR_GetValueType(ctx, iv);
+        if (MLIR_GetTypeKind(ctx, iv_ty) != MLIR_TYPE_KIND_INTEGER) continue;
+        uint32_t iv_w = MLIR_GetTypeWidth(ctx, iv_ty);
+        if (iv_w == 0 || iv_w > 64) continue;
+        int64_t lim_c = 0;
+        bool has_const_lim = cf_get_int_const(ctx, lim_v, &lim_c, NULL);
+        if (has_const_lim) lim_c = cf_sext(lim_c, iv_w);
 
         // Find which block arg of hblk is `iv`.
         size_t iv_arg = hna;
@@ -2199,30 +2203,28 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             MLIR_GetOpNumSuccessorOperands(ctx, pterm, 0) != hna) continue;
 
         int64_t init_c = 0;
-        if (!cf_get_int_const(ctx, MLIR_GetOpSuccessorOperand(ctx, pterm, 0, iv_arg), &init_c, NULL))
-            continue;
-        init_c = cf_sext(init_c, iv_w);
+        bool has_const_init = cf_get_int_const(ctx, MLIR_GetOpSuccessorOperand(ctx, pterm, 0, iv_arg), &init_c, NULL);
+        if (has_const_init) init_c = cf_sext(init_c, iv_w);
 
-        // Verify iv_next = add(iv, step_const) (or and(add(iv, step_const), mask) for narrow unsigned iv).
+        // Verify iv_next = add(iv, step) (or and(add(iv, step_const), mask) for narrow unsigned iv).
         MLIR_ValueHandle iv_next = MLIR_GetOpSuccessorOperand(ctx, lterm, 0, iv_arg);
         MLIR_OpHandle iv_add = MLIR_GetValueDefiningOp(ctx, iv_next);
+        bool masked_iv = false;
         if (iv_add != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, iv_add) == OP_TYPE_LLVM_AND) {
             int64_t mask_c = 0;
-            if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, iv_add, 1), &mask_c, NULL) &&
+            if (has_const_lim &&
+                cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, iv_add, 1), &mask_c, NULL) &&
                 lim_c >= 0 && lim_c < mask_c && (mask_c & (mask_c + 1)) == 0) {
                 iv_add = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, iv_add, 0));
+                masked_iv = true;
             }
         }
         if (iv_add == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, iv_add) != OP_TYPE_LLVM_ADD) continue;
+        if (MLIR_GetOpOperand(ctx, iv_add, 0) != iv) continue;
+        MLIR_ValueHandle step_v = MLIR_GetOpOperand(ctx, iv_add, 1);
         int64_t step_c = 0;
-        if (MLIR_GetOpOperand(ctx, iv_add, 0) != iv ||
-            !cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, iv_add, 1), &step_c, NULL)) continue;
-        step_c = cf_sext(step_c, iv_w);
-        if (step_c <= 0) continue;
-
-        int64_t diff = lim_c - init_c + (pred == 3 ? 1 : 0);
-        if (diff <= 0 || (diff % step_c) != 0) continue;
-        int64_t trips = diff / step_c;
+        bool has_const_step = cf_get_int_const(ctx, step_v, &step_c, NULL);
+        if (has_const_step) step_c = cf_sext(step_c, iv_w);
 
         // Collect all body (+ latch) ops and check they are safe to clone (no calls/allocas/regions, <= 48 ops).
         MLIR_OpHandle body_ops[64];
@@ -2246,19 +2248,22 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         }
         if (!body_ok || n_body == 0) continue;
 
-        // Decide unroll factor:
-        // - Complete unroll (trips) if 2 <= trips <= 8 and n_body * trips <= 256 (e.g. crcu8!)
-        // - 4x unroll if trips >= 16 && (trips % 4) == 0 && n_body <= 32 (e.g. matmul 256!)
+        // Decide static unroll factor:
         size_t factor = 0;
         bool complete = false;
-        if (trips >= 2 && trips <= 8 && n_body * (size_t)trips <= 256) {
-            factor = (size_t)trips;
-            complete = true;
-        } else if (trips >= 16 && (trips % 4) == 0 && n_body <= 32) {
-            factor = 4;
-        } else {
-            continue;
+        if (has_const_init && has_const_lim && has_const_step && step_c > 0) {
+            int64_t diff = lim_c - init_c + (pred == 3 ? 1 : 0);
+            if (diff > 0 && (diff % step_c) == 0) {
+                int64_t trips = diff / step_c;
+                if (trips >= 2 && trips <= 8 && n_body * (size_t)trips <= 256) {
+                    factor = (size_t)trips;
+                    complete = true;
+                } else if (trips >= 16 && (trips % 4) == 0 && n_body <= 32) {
+                    factor = 4;
+                }
+            }
         }
+        if (factor == 0) continue;
 
         // Verify no body-defined value escapes outside {bblk, lblk} (only header block args may be live out!).
         bool body_escapes = false;
@@ -2292,18 +2297,62 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         }
         if (body_escapes) continue;
 
-        // Unroll by cloning body_ops (factor - 1) additional times into latch_blk before lterm!
-        MLIR_BlockHandle ins_blk = (lblk != MLIR_INVALID_HANDLE) ? lblk : bblk;
-        size_t ins_pos = MLIR_GetBlockNumOps(ctx, ins_blk) - 1;
-
-        MLIR_ValueHandle hargs[8];
-        MLIR_ValueHandle cur_vals[8];
-        MLIR_ValueHandle back_vals[8];
+        MLIR_ValueHandle hargs[8], init_vals[8], back_vals[8], cur_vals[8];
         for (size_t a = 0; a < hna; a++) {
             hargs[a] = MLIR_GetBlockArg(ctx, hblk, a);
+            init_vals[a] = MLIR_GetOpSuccessorOperand(ctx, pterm, 0, a);
             back_vals[a] = MLIR_GetOpSuccessorOperand(ctx, lterm, 0, a);
             cur_vals[a] = back_vals[a];
         }
+
+        if (complete && MLIR_GetOpNumSuccessorOperands(ctx, hterm, 1) == 0) {
+            // Complete unroll: clone all `factor` iterations into pre_blk, bypass loop completely!
+            size_t ins_pos = MLIR_GetBlockNumOps(ctx, pre_blk) - 1;
+            for (size_t a = 0; a < hna; a++) cur_vals[a] = init_vals[a];
+            for (size_t u = 0; u < factor; u++) {
+                MLIR_ValueHandle old_v[64], new_v[64];
+                size_t n_map = 0;
+                for (size_t a = 0; a < hna; a++) {
+                    old_v[n_map] = hargs[a];
+                    new_v[n_map] = cur_vals[a];
+                    n_map++;
+                }
+                for (size_t j = 0; j < n_body; j++) {
+                    MLIR_OpHandle cl = unroll_clone_op(ctx, body_ops[j], old_v, new_v, n_map);
+                    MLIR_InsertBlockOpAtIndex(ctx, pre_blk, cl, ins_pos++);
+                    if (MLIR_GetOpNumResults(ctx, body_ops[j]) == 1) {
+                        old_v[n_map] = MLIR_GetOpResult(ctx, body_ops[j], 0);
+                        new_v[n_map] = MLIR_GetOpResult(ctx, cl, 0);
+                        n_map++;
+                    }
+                }
+                for (size_t a = 0; a < hna; a++) {
+                    MLIR_ValueHandle nv = back_vals[a];
+                    for (size_t m = 0; m < n_map; m++) {
+                        if (old_v[m] == nv) { nv = new_v[m]; break; }
+                    }
+                    cur_vals[a] = nv;
+                }
+            }
+            for (size_t a = 0; a < hna; a++) {
+                MLIR_ReplaceAllUsesOfValue(ctx, hargs[a], cur_vals[a]);
+            }
+            uint32_t zero = 0;
+            MLIR_OpSpec nbsp;
+            memset(&nbsp, 0, sizeof(nbsp));
+            nbsp.type = OP_TYPE_LLVM_BR;
+            nbsp.successors = &eblk;
+            nbsp.n_successors = 1;
+            nbsp.successor_operand_counts = &zero;
+            MLIR_OpHandle new_pt = MLIR_CreateOpFromSpec(ctx, &nbsp);
+            MLIR_InsertBlockOpAtIndex(ctx, pre_blk, new_pt, ins_pos);
+            MLIR_DetachOp(ctx, pterm);
+            continue;
+        }
+
+        // Static partial unroll: clone body_ops (factor - 1) additional times into latch_blk before lterm!
+        MLIR_BlockHandle ins_blk = (lblk != MLIR_INVALID_HANDLE) ? lblk : bblk;
+        size_t ins_pos = MLIR_GetBlockNumOps(ctx, ins_blk) - 1;
 
         for (size_t u = 1; u < factor; u++) {
             MLIR_ValueHandle old_v[64], new_v[64];
@@ -2344,7 +2393,6 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         MLIR_OpHandle new_lt = MLIR_CreateOpFromSpec(ctx, &nbsp);
         MLIR_InsertBlockOpAtIndex(ctx, ins_blk, new_lt, ins_pos);
         MLIR_DetachOp(ctx, lterm);
-        (void)complete;
     }
 
     free(bhk); free(bhv);
