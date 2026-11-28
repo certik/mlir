@@ -738,7 +738,11 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                          oty == OP_TYPE_LLVM_MLIR_ZERO ||
                          oty == OP_TYPE_LLVM_MLIR_NULL) &&
                         ra_is_const(T, ctx, op);
-            bool skip = is_c || ra_is_folded(T, ctx, op);
+            bool is_remat_x64 = T->remat_alloca &&
+                                (oty == OP_TYPE_LLVM_ALLOCA ||
+                                 oty == OP_TYPE_LLVM_MLIR_ADDRESSOF ||
+                                 oty == OP_TYPE_LLVM_MLIR_UNDEF);
+            bool skip = is_c || is_remat_x64 || ra_is_folded(T, ctx, op);
             if (!skip) {
                 size_t nr = MLIR_GetOpNumResults(ctx, op);
                 if (nv + nr > nv_max) return RA_BAIL;

@@ -80,6 +80,7 @@ typedef struct RegTarget {
     int nhome;
     uint8_t pool[RA_MAXPOOL];
     SlotMap *memfuse, *memspine, *shiftfuse;
+    bool remat_alloca;
 } RegTarget;
 
 // Fast block-local linear-scan allocator for -O0 / default mode: O(ops) with

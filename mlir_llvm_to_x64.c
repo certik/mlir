@@ -355,6 +355,7 @@ static RegTarget x64_regtarget(void) {
     T.npool = 10; T.ncaller = 5; T.nhome = 3;
     T.pool[0] = R10; T.pool[1] = R8; T.pool[2] = R9; T.pool[3] = RSI; T.pool[4] = RDI;
     T.pool[5] = RBX; T.pool[6] = R12; T.pool[7] = R13; T.pool[8] = R14; T.pool[9] = R15;
+    T.remat_alloca = true;
     return T;
 }
 // True (with *reg set) if value `v` has a physical-register home.
@@ -917,6 +918,12 @@ static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
             else
                 lea_rip_func(F, reg, gn);   // function / external symbol
             return;
+        } else if (dt == OP_TYPE_LLVM_ALLOCA) {
+            int32_t region;
+            if (vmap_get(&F->slots, x64_region_key(def), &region)) {
+                lea_rbp(F, reg, region);
+                return;
+            }
         }
     }
     if (!F->fast_ra) {

@@ -102,6 +102,10 @@ static bool licm_is_hoistable(MLIR_Context *ctx, MLIR_OpHandle op) {
     case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_TRUNC:
     case OP_TYPE_LLVM_INTTOPTR: case OP_TYPE_LLVM_PTRTOINT: case OP_TYPE_LLVM_BITCAST:
     case OP_TYPE_LLVM_GEP:
+        // Do NOT hoist constant-offset GEPs: on x86-64 `[base + disp]` folds
+        // for free into load/store addressing modes, whereas hoisting creates a
+        // long-lived pointer that increases register pressure and spills.
+        return MLIR_GetOpNumOperands(ctx, op) > 1;
     case OP_TYPE_LLVM_ICMP: case OP_TYPE_LLVM_SELECT:
     case OP_TYPE_LLVM_FADD: case OP_TYPE_LLVM_FSUB: case OP_TYPE_LLVM_FMUL:
     case OP_TYPE_LLVM_FNEG: case OP_TYPE_LLVM_FPEXT: case OP_TYPE_LLVM_FPTRUNC:
@@ -518,7 +522,7 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     if (MLIR_GetOpNumRegions(ctx, fn) == 0) return false;
     MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
-    if (nb == 0 || nb > 8) return false;
+    if (nb == 0 || nb > 12) return false;
     string name = opt_attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
     if (name.size == 0) return false;
     if (name.size == 4 && memcmp(name.str, "main", 4) == 0) return false;
@@ -530,11 +534,12 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     }
     size_t total_ops = 0;
     bool has_alloca = false;
+    bool has_call = false;
     for (size_t b = 0; b < nb; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         total_ops += no;
-        if (total_ops > 50) return false;
+        if (total_ops > 90) return false;
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return false;
@@ -544,12 +549,16 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
                 return false;
             if (t == OP_TYPE_LLVM_ALLOCA) has_alloca = true;
             if (t == OP_TYPE_LLVM_CALL || t == OP_TYPE_FUNC_CALL) {
+                has_call = true;
                 string cn = opt_strip_at(opt_attr_str(ctx, op, MLIR_KEY_CALLEE));
                 if (!cn.size) cn = opt_strip_at(opt_attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
                 if (opt_str_eq(cn, name)) return false; // skip directly recursive callee
             }
         }
     }
+    // Non-leaf functions use the tighter budget (<= 8 blocks, <= 50 ops);
+    // leaf functions (like crcu8) get up to 12 blocks / 90 ops.
+    if (has_call && (nb > 8 || total_ops > 50)) return false;
     out->name = name;
     out->fn = fn;
     out->n_ops = total_ops;
@@ -1217,6 +1226,152 @@ static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
     free(hk); free(hv); free(vis); free(q);
 }
 
+static bool ifcvt_is_cheap_pure(MLIR_Context *ctx, MLIR_OpHandle op) {
+    switch (MLIR_GetOpType(ctx, op)) {
+    case OP_TYPE_LLVM_MLIR_CONSTANT:
+    case OP_TYPE_LLVM_MLIR_ZERO:
+    case OP_TYPE_LLVM_MLIR_NULL:
+    case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB:
+    case OP_TYPE_LLVM_AND: case OP_TYPE_LLVM_OR:  case OP_TYPE_LLVM_XOR:
+    case OP_TYPE_LLVM_SHL: case OP_TYPE_LLVM_LSHR: case OP_TYPE_LLVM_ASHR:
+    case OP_TYPE_LLVM_SEXT: case OP_TYPE_LLVM_ZEXT: case OP_TYPE_LLVM_TRUNC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// If-conversion: convert small 1-arm triangle diamonds (`if (c) x = pure(x);`)
+// into branchless `llvm.select` (-> `cmov`), eliminating unpredictable branches
+// (e.g. CoreMark's `crcu8` 50/50 CRC polynomial branch).
+static void if_convert_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    if (MLIR_GetOpNumRegions(ctx, fn) == 0) return;
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    if (nb < 3) return;
+
+    // Count predecessors of each block.
+    size_t hcap = 16;
+    while (hcap < nb * 2) hcap *= 2;
+    uintptr_t *hk = (uintptr_t *)calloc(hcap, sizeof(uintptr_t));
+    int32_t   *hv = (int32_t   *)malloc(hcap * sizeof(int32_t));
+    uint32_t  *pc = (uint32_t  *)calloc(nb, sizeof(uint32_t));
+    if (!hk || !hv || !pc) { free(hk); free(hv); free(pc); return; }
+    size_t hmask = hcap - 1;
+    for (size_t b = 0; b < nb; b++) {
+        uintptr_t k = (uintptr_t)MLIR_GetRegionBlock(ctx, reg, b);
+        size_t s = (k * 1099511628211ull) & hmask;
+        while (hk[s]) s = (s + 1) & hmask;
+        hk[s] = k; hv[s] = (int32_t)b;
+    }
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        if (no == 0) continue;
+        MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+        size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+        for (size_t si = 0; si < ns; si++) {
+            uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, si);
+            size_t s = (sk * 1099511628211ull) & hmask;
+            while (hk[s]) { if (hk[s] == sk) { pc[hv[s]]++; break; } s = (s + 1) & hmask; }
+        }
+    }
+
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        if (no == 0) continue;
+        MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+        if (MLIR_GetOpType(ctx, term) != OP_TYPE_LLVM_COND_BR) continue;
+        MLIR_BlockHandle s0 = MLIR_GetOpSuccessor(ctx, term, 0);
+        MLIR_BlockHandle s1 = MLIR_GetOpSuccessor(ctx, term, 1);
+        size_t nso0 = MLIR_GetOpNumSuccessorOperands(ctx, term, 0);
+        size_t nso1 = MLIR_GetOpNumSuccessorOperands(ctx, term, 1);
+
+        // Try both orientations: arm=0 is the single-pred small block, merge=s1 (or vice versa).
+        for (int arm = 0; arm < 2; arm++) {
+            MLIR_BlockHandle arm_blk = (arm == 0) ? s0 : s1;
+            MLIR_BlockHandle mrg_blk = (arm == 0) ? s1 : s0;
+            size_t arm_nso = (arm == 0) ? nso0 : nso1;
+            size_t mrg_nso = (arm == 0) ? nso1 : nso0;
+            if (arm_nso != 0 || mrg_nso != 1 || arm_blk == bk || arm_blk == mrg_blk) continue;
+            if (MLIR_GetBlockNumArgs(ctx, arm_blk) != 0) continue;
+            if (MLIR_GetBlockNumArgs(ctx, mrg_blk) != 1) continue;
+            // Lookup arm_blk pred count
+            uintptr_t ak = (uintptr_t)arm_blk;
+            size_t s = (ak * 1099511628211ull) & hmask;
+            int32_t abi = -1;
+            while (hk[s]) { if (hk[s] == ak) { abi = hv[s]; break; } s = (s + 1) & hmask; }
+            if (abi <= 0 || pc[abi] != 1) continue;
+
+            size_t ano = MLIR_GetBlockNumOps(ctx, arm_blk);
+            if (ano < 2 || ano > 8) continue;
+            MLIR_OpHandle aterm = MLIR_GetBlockOp(ctx, arm_blk, ano - 1);
+            if (MLIR_GetOpType(ctx, aterm) != OP_TYPE_LLVM_BR ||
+                MLIR_GetOpSuccessor(ctx, aterm, 0) != mrg_blk ||
+                MLIR_GetOpNumSuccessorOperands(ctx, aterm, 0) != 1)
+                continue;
+            // Only convert integer/pointer selects (avoid float select).
+            MLIR_ValueHandle mrg_arg = MLIR_GetBlockArg(ctx, mrg_blk, 0);
+            MLIR_TypeHandle mrg_ty = MLIR_GetValueType(ctx, mrg_arg);
+            MLIR_TypeKind mk = MLIR_GetTypeKind(ctx, mrg_ty);
+            if (mk != MLIR_TYPE_KIND_INTEGER && mk != MLIR_TYPE_KIND_LLVM_POINTER) continue;
+
+            bool all_cheap = true;
+            int n_real = 0;
+            for (size_t i = 0; i + 1 < ano; i++) {
+                MLIR_OpHandle aop = MLIR_GetBlockOp(ctx, arm_blk, i);
+                if (!ifcvt_is_cheap_pure(ctx, aop)) { all_cheap = false; break; }
+                MLIR_OpType at = MLIR_GetOpType(ctx, aop);
+                if (at != OP_TYPE_LLVM_MLIR_CONSTANT && at != OP_TYPE_LLVM_MLIR_ZERO &&
+                    at != OP_TYPE_LLVM_MLIR_NULL)
+                    n_real++;
+            }
+            if (!all_cheap || n_real == 0 || n_real > 3) continue;
+
+            // Hoist arm_blk's ops into bk before term!
+            size_t insert_pos = no - 1;
+            for (size_t i = 0; i + 1 < ano; i++) {
+                MLIR_OpHandle aop = MLIR_GetBlockOp(ctx, arm_blk, 0);
+                MLIR_DetachOp(ctx, aop);
+                MLIR_InsertBlockOpAtIndex(ctx, bk, aop, insert_pos++);
+            }
+            MLIR_ValueHandle cond    = MLIR_GetOpOperand(ctx, term, 0);
+            MLIR_ValueHandle arm_val = MLIR_GetOpSuccessorOperand(ctx, aterm, 0, 0);
+            MLIR_ValueHandle old_val = MLIR_GetOpSuccessorOperand(ctx, term, (size_t)(1 - arm), 0);
+            MLIR_ValueHandle sel_ops[3];
+            sel_ops[0] = cond;
+            sel_ops[1] = (arm == 0) ? arm_val : old_val;
+            sel_ops[2] = (arm == 0) ? old_val : arm_val;
+            MLIR_OpSpec ssp;
+            memset(&ssp, 0, sizeof(ssp));
+            ssp.type = OP_TYPE_LLVM_SELECT;
+            ssp.operands = sel_ops;
+            ssp.n_operands = 3;
+            ssp.result_types = &mrg_ty;
+            ssp.n_results = 1;
+            MLIR_OpHandle sel_op = MLIR_CreateOpFromSpec(ctx, &ssp);
+            MLIR_InsertBlockOpAtIndex(ctx, bk, sel_op, insert_pos++);
+
+            MLIR_ValueHandle sel_res = MLIR_GetOpResult(ctx, sel_op, 0);
+            uint32_t one = 1;
+            MLIR_OpSpec bsp;
+            memset(&bsp, 0, sizeof(bsp));
+            bsp.type = OP_TYPE_LLVM_BR;
+            bsp.operands = &sel_res;
+            bsp.n_operands = 1;
+            bsp.successors = &mrg_blk;
+            bsp.n_successors = 1;
+            bsp.successor_operand_counts = &one;
+            MLIR_OpHandle new_br = MLIR_CreateOpFromSpec(ctx, &bsp);
+            MLIR_InsertBlockOpAtIndex(ctx, bk, new_br, insert_pos);
+            MLIR_DetachOp(ctx, term);
+            break;
+        }
+    }
+    free(hk); free(hv); free(pc);
+}
+
 void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module) {
     if (getenv("TINYC_NO_SIMPLIFY_CFG")) return;
     if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
@@ -1227,6 +1382,7 @@ void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module) {
     for (size_t i = 0; i < n; i++) {
         MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
         if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
+        if_convert_func(ctx, fn);
         simplify_cfg_func(ctx, fn);
     }
 }
