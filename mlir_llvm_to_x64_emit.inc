@@ -2415,7 +2415,10 @@ static void x64_compute_lbl_liveness(MLIR_Context *ctx, MLIR_BlockHandle blk, si
     int32_t *s0 = (int32_t *)malloc(nb * sizeof(int32_t));
     int32_t *s1 = (int32_t *)malloc(nb * sizeof(int32_t));
     uint8_t *is_jtab = (uint8_t *)calloc(nb, 1);
-    const uint16_t call_reads = (uint16_t)((1u<<RDI)|(1u<<RSI)|(1u<<RDX)|(1u<<RCX)|(1u<<R8)|(1u<<R9)|(1u<<RAX));
+    // RAX and RCX are unallocated scratch regs: emit_sysv_call_args always writes
+    // them in the same basic block before CALL_SYM/CALL_REG when needed, so they
+    // are never live-in across block boundaries into a call.
+    const uint16_t call_reads = (uint16_t)((1u<<RDI)|(1u<<RSI)|(1u<<RDX)|(1u<<R8)|(1u<<R9));
     const uint16_t call_writes = (uint16_t)((1u<<RAX)|(1u<<RCX)|(1u<<RDX)|(1u<<RSI)|(1u<<RDI)|(1u<<R8)|(1u<<R9)|(1u<<R10)|(1u<<R11));
 
     for (size_t b = 0; b < nb; b++) {
@@ -2747,6 +2750,47 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                     uint16_t kr = 0, kw = 0;
                     if (!x64_op_regs(ctx, opk, &kr, &kw) || (kw & (uint16_t)(1u << r0)))
                         break;
+                }
+            }
+
+            // 0k. Fold `shl $1/2/3, idx` (64-bit) into an immediately following scale==0
+            //     SIB memory op (`LOAD_MEM_SIB`, `STORE_MEM_SIB`, `ALU_RM_SIB`, `LEA_SIB`)
+            //     when `idx` is dead after the SIB op (e.g. qsort `a[j] > pivot`).
+            if (t0 == OP_TYPE_X64_SHIFT_IMM &&
+                (t1 == OP_TYPE_X64_LOAD_MEM_SIB || t1 == OP_TYPE_X64_STORE_MEM_SIB ||
+                 t1 == OP_TYPE_X64_ALU_RM_SIB || t1 == OP_TYPE_X64_LEA_SIB)) {
+                uint64_t v0 = (uint64_t)MLIR_GetOpInlineI64(ctx, op0);
+                uint8_t sr = (uint8_t)(v0 & 15);
+                int ext = (int)((v0 >> 4) & 7), sw = (int)((v0 >> 8) & 1);
+                uint8_t sh = (uint8_t)((v0 >> 12) & 0xff);
+                if (ext == 4 && sw == 1 && sh >= 1 && sh <= 3) {
+                    uint64_t v1 = (uint64_t)MLIR_GetOpInlineI64(ctx, op1);
+                    bool base_in_hi = (t1 == OP_TYPE_X64_LOAD_MEM_SIB || t1 == OP_TYPE_X64_ALU_RM_SIB || t1 == OP_TYPE_X64_LEA_SIB);
+                    uint8_t base1 = base_in_hi ? (uint8_t)((v1 >> 4) & 15) : (uint8_t)(v1 & 15);
+                    uint8_t idx1  = base_in_hi ? (uint8_t)((v1 >> 8) & 15) : (uint8_t)((v1 >> 4) & 15);
+                    int sc1 = (int)((v1 >> 12) & 3);
+                    uint8_t dst1 = base_in_hi ? (uint8_t)(v1 & 15) : (uint8_t)((v1 >> 8) & 15);
+                    bool swap_bi = (sc1 == 0 && base1 == sr && idx1 != sr && sr != RSP);
+                    if (swap_bi) { uint8_t tmp = base1; base1 = idx1; idx1 = tmp; }
+                    bool idx_clobbered = (t1 == OP_TYPE_X64_LOAD_MEM_SIB || t1 == OP_TYPE_X64_LEA_SIB) && dst1 == sr;
+                    if (sc1 == 0 && idx1 == sr && base1 != sr && sr != RSP &&
+                        (t1 != OP_TYPE_X64_STORE_MEM_SIB || dst1 != sr) &&
+                        (t1 != OP_TYPE_X64_ALU_RM_SIB || dst1 != sr) &&
+                        (idx_clobbered || x64_reg_dead_after(ctx, blk, j + 1, n_ops, sr)) &&
+                        (t1 == OP_TYPE_X64_ALU_RM_SIB || x64_flags_dead_after(ctx, blk, j + 1, n_ops))) {
+                        uint64_t nv1 = v1;
+                        if (swap_bi) {
+                            if (base_in_hi)
+                                nv1 = (nv1 & ~(0xffull << 4)) | ((uint64_t)base1 << 4) | ((uint64_t)idx1 << 8);
+                            else
+                                nv1 = (nv1 & ~0xffull) | (uint64_t)base1 | ((uint64_t)idx1 << 4);
+                        }
+                        nv1 = (nv1 & ~(3ull << 12)) | ((uint64_t)sh << 12);
+                        MLIR_RewriteVoidInlineI64(ctx, op0, OP_TYPE_X64_NOP, 0);
+                        MLIR_RewriteVoidInlineI64(ctx, op1, t1, (int64_t)nv1);
+                        changed = true;
+                        continue;
+                    }
                 }
             }
 
@@ -3905,11 +3949,14 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         memset(g_lbl_seen, 0, need);
     }
     // Hoist `lea jtab(%rip), %jtab_reg` into prologue when the function has a
-    // single jump table, no calls, and an unused caller-saved GP register.
+    // single jump table, no calls, and an unused GP register (caller-saved preferred,
+    // or callee-saved in push-only stack-free functions like `interp`'s `run`).
     int jtab_reg = -1;
+    bool jtab_push_cs = false;
     if (g_x64_opt_level >= 2 && F->n_jtabs == 1 && !F->fast_ra) {
         uint16_t fn_regs = 0;
         bool has_call = false;
+        bool has_stack_ops = false;
         for (size_t i = 0; i < n_ops; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
             MLIR_OpType ty = MLIR_GetOpType(ctx, op);
@@ -3917,6 +3964,13 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
                 ty == OP_TYPE_X64_REP_MOVSB || ty == OP_TYPE_X64_REP_STOSB ||
                 ty == OP_TYPE_X64_REPE_CMPSB || ty == OP_TYPE_X64_REPNE_SCASB) {
                 has_call = true; break;
+            }
+            if (ty == OP_TYPE_X64_SUB_RSP || ty == OP_TYPE_X64_ADD_RSP ||
+                ty == OP_TYPE_X64_LOAD_RBP || ty == OP_TYPE_X64_STORE_RBP ||
+                ty == OP_TYPE_X64_LOAD_RBP_SIZED || ty == OP_TYPE_X64_STORE_RBP_SIZED ||
+                ty == OP_TYPE_X64_LEA_RBP || ty == OP_TYPE_X64_LEAVE ||
+                ty == OP_TYPE_X64_LOAD_RBP_XMM || ty == OP_TYPE_X64_STORE_RBP_XMM) {
+                has_stack_ops = true;
             }
             uint16_t rr = 0, ww = 0;
             if (x64_op_regs(ctx, op, &rr, &ww)) fn_regs |= (uint16_t)(rr | ww);
@@ -3926,10 +3980,25 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             for (int c = 0; c < 6; c++) {
                 if ((fn_regs & (1u << cand_regs[c])) == 0) { jtab_reg = (int)cand_regs[c]; break; }
             }
+            if (jtab_reg < 0 && !has_stack_ops) {
+                static const uint8_t cs_cands[5] = { R14, R15, R13, R12, RBX };
+                for (int c = 0; c < 5; c++) {
+                    if ((fn_regs & (1u << cs_cands[c])) == 0) {
+                        jtab_reg = (int)cs_cands[c];
+                        jtab_push_cs = true;
+                        break;
+                    }
+                }
+            }
         }
     }
     F->x64_blk = MLIR_INVALID_HANDLE; // switch low-level helpers to direct byte emission
     F->n_fix = 0;
+    if (jtab_push_cs) {
+        uint8_t r = (uint8_t)jtab_reg;
+        if (r >= 8) eb(F, 0x41);
+        eb(F, (uint8_t)(0x50 + (r & 7)));
+    }
 
     for (size_t i = 0; i < n_ops; i++) {
         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
@@ -4002,7 +4071,14 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             break;
         }
         case OP_TYPE_X64_LEAVE: eb(F, 0xC9); break;
-        case OP_TYPE_X64_RET:   eb(F, 0xC3); break;
+        case OP_TYPE_X64_RET:
+            if (jtab_push_cs) {
+                uint8_t r = (uint8_t)jtab_reg;
+                if (r >= 8) eb(F, 0x41);
+                eb(F, (uint8_t)(0x58 + (r & 7)));
+            }
+            eb(F, 0xC3);
+            break;
         case OP_TYPE_X64_UD2:   eb(F, 0x0F); eb(F, 0x0B); break;
         case OP_TYPE_X64_MOV_RR: {
             uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
