@@ -1,0 +1,21 @@
+#include <stdio.h>
+#include <math.h>
+
+int main(void) {
+    double s = sin(0.0);
+    double c = cos(0.0);
+    double e = exp(0.0);
+    double l = log(1.0);
+    double p = pow(2.0, 10.0);
+    double q = sqrt(16.0);
+    double f = floor(2.7);
+    double cl = ceil(2.1);
+    printf("%d %d %d %d %d %d %d %d\n",
+           (int)s, (int)c, (int)e, (int)l, (int)p, (int)q, (int)f, (int)cl);
+
+    float sf = sinf(0.0f);
+    float cf = cosf(0.0f);
+    float pf = powf(2.0f, 8.0f);
+    printf("%d %d %d\n", (int)sf, (int)cf, (int)pf);
+    return 0;
+}
