@@ -1712,7 +1712,7 @@ static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         uint8_t is_ret[64];
         size_t max_latch = 0;
         bool has_ret_in_loop = false;
-        bool has_switch = false;
+        size_t ret_preds = 0;
         for (size_t b = 0; b < nb; b++) {
             blks[b] = MLIR_GetRegionBlock(ctx, reg, b);
             size_t no = MLIR_GetBlockNumOps(ctx, blks[b]);
@@ -1723,7 +1723,6 @@ static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             if (tt == OP_TYPE_LLVM_RETURN || tt == OP_TYPE_FUNC_RETURN) {
                 is_ret[b] = 1;
             } else {
-                if (tt == OP_TYPE_LLVM_SWITCH) has_switch = true;
                 size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
                 for (size_t si = 0; si < ns; si++) {
                     size_t ti = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, t, si));
@@ -1734,7 +1733,18 @@ static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         for (size_t b = 1; b < max_latch; b++) {
             if (is_ret[b]) { has_ret_in_loop = true; break; }
         }
-        if (has_ret_in_loop && has_switch) {
+        if (has_ret_in_loop) {
+            for (size_t b = 0; b < nb; b++) {
+                MLIR_OpHandle t = MLIR_GetBlockTerminator(ctx, blks[b]);
+                if (t == MLIR_INVALID_HANDLE) continue;
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+                for (size_t si = 0; si < ns; si++) {
+                    size_t ti = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, t, si));
+                    if (ti < nb && is_ret[ti]) ret_preds++;
+                }
+            }
+        }
+        if (has_ret_in_loop && ret_preds >= 2) {
             uint8_t vis[64];
             memset(vis, 0, nb);
             size_t post[64], n_post = 0;
