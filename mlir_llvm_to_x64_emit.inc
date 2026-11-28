@@ -1439,6 +1439,33 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 if (op_idx >= MLIR_GetOpNumOperands(ctx, op)) { fail(F, "gep dynamic index operand missing", (string){0}); return; }
                 MLIR_ValueHandle idx_v = MLIR_GetOpOperand(ctx, op, op_idx++);
                 int ib = int_bits(ctx, idx_v);
+                // Fast path for bitfield-scaled GEP index (e.g. Lua `base + GETARG_A(i)`):
+                // `and(lshr(x, s1), mask) * (1 << sh)` -> `(x >> (s1 - sh)) & (mask << sh)`.
+                if (ib == 32 && stride > 1 && (stride & (stride - 1)) == 0) {
+                    int sh = 0;
+                    unsigned u = stride;
+                    while ((u >>= 1) != 0) sh++;
+                    MLIR_OpHandle id = MLIR_GetValueDefiningOp(ctx, idx_v);
+                    int64_t mask = 0, s1 = 0;
+                    if (id != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, id) == OP_TYPE_LLVM_AND &&
+                        is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, id, 1)), &mask) &&
+                        mask >= 0 && ((uint64_t)mask << sh) <= 0x7fffffffll) {
+                        MLIR_ValueHandle lhs = MLIR_GetOpOperand(ctx, id, 0);
+                        MLIR_OpHandle ld = MLIR_GetValueDefiningOp(ctx, lhs);
+                        if (ld != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, ld) == OP_TYPE_LLVM_LSHR &&
+                            is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, ld, 1)), &s1) &&
+                            s1 >= sh && s1 < 32) {
+                            MLIR_ValueHandle xv = MLIR_GetOpOperand(ctx, ld, 0);
+                            load_val_w(F, xv, RCX, 0);
+                            if (s1 > sh)
+                                x64_emit1(F, OP_TYPE_X64_SHIFT_IMM,
+                                          (int64_t)RCX | (5ll << 4) | (0ll << 8) | ((int64_t)(s1 - sh) << 12));
+                            alu_ri(F, 4 /*and*/, RCX, (int32_t)((uint32_t)mask << sh), 0);
+                            alu_rr(F, 0x01, RAX, RCX, 1);
+                            continue;
+                        }
+                    }
+                }
                 load_val_w(F, idx_v, RCX, (ib == 0 || ib > 32) ? 1 : 0);
                 // GEP indices are signed and sign-extend to the pointer width.
                 // load_val zero-extends a 32-bit index, so a negative index
@@ -1593,6 +1620,44 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                         store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                     return;
                 }
+                if (str_eqz(callee, "memcmp") || str_eqz(callee, "base_memcmp")) {
+                    emit_parallel_arg_moves(F, op, 0, 3);    // RDI=a, RSI=b, RDX=n
+                    mov_ri(F, RAX, 0, 0);
+                    mov_rr(F, RCX, RDX, 1);
+                    int lbl_done = F->x64_next_label++;
+                    alu_rr(F, 0x85, RCX, RCX, 1);            // test rcx, rcx
+                    x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_E | ((int64_t)lbl_done << 32));
+                    x64_emit0(F, OP_TYPE_X64_REPE_CMPSB);
+                    x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_E | ((int64_t)lbl_done << 32));
+                    load_mem_disp(F, RAX, RDI, 1, false, -1);
+                    load_mem_disp(F, RCX, RSI, 1, false, -1);
+                    alu_rr(F, 0x29, RAX, RCX, 0);            // sub eax, ecx
+                    x64_emit1(F, OP_TYPE_X64_LABEL, (int64_t)lbl_done);
+                    if (MLIR_GetOpNumResults(ctx, op) == 1)
+                        store_val_w(F, MLIR_GetOpResult(ctx, op, 0), RAX, 0);
+                    return;
+                }
+            }
+            if (g_x64_opt_level >= 2 && !F->wasm_lifted && no == 2 &&
+                (str_eqz(callee, "strcmp") || str_eqz(callee, "base_strcmp"))) {
+                emit_parallel_arg_moves(F, op, 0, 2);        // RDI=s1, RSI=s2
+                int lbl_lp = F->x64_next_label++;
+                int lbl_dn = F->x64_next_label++;
+                x64_emit1(F, OP_TYPE_X64_LABEL, (int64_t)lbl_lp);
+                load_mem(F, RAX, RDI, 1, false);
+                load_mem(F, RCX, RSI, 1, false);
+                alu_rr(F, 0x39, RAX, RCX, 0);                // cmp eax, ecx
+                x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_NE | ((int64_t)lbl_dn << 32));
+                alu_rr(F, 0x85, RAX, RAX, 0);                // test eax, eax
+                x64_emit1(F, OP_TYPE_X64_JCC, (int64_t)CC_E | ((int64_t)lbl_dn << 32));
+                alu_ri(F, 0, RDI, 1, 1);
+                alu_ri(F, 0, RSI, 1, 1);
+                x64_emit1(F, OP_TYPE_X64_JMP, (int64_t)lbl_lp);
+                x64_emit1(F, OP_TYPE_X64_LABEL, (int64_t)lbl_dn);
+                alu_rr(F, 0x29, RAX, RCX, 0);                // sub eax, ecx
+                if (MLIR_GetOpNumResults(ctx, op) == 1)
+                    store_val_w(F, MLIR_GetOpResult(ctx, op, 0), RAX, 0);
+                return;
             }
             if (g_x64_opt_level >= 2 && !F->wasm_lifted && no == 1 &&
                 (str_eqz(callee, "strlen") || str_eqz(callee, "base_strlen"))) {
@@ -3302,6 +3367,10 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         }
         case OP_TYPE_X64_REPNE_SCASB: {
             eb(F, 0xF2); eb(F, 0xAE);
+            break;
+        }
+        case OP_TYPE_X64_REPE_CMPSB: {
+            eb(F, 0xF3); eb(F, 0xA6);
             break;
         }
         case OP_TYPE_X64_SUB_RSP: {
