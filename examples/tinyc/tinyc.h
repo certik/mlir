@@ -133,6 +133,7 @@ struct Type {
     bool     ptr_is_f32;
     bool     ptr_is_f64;
     bool     array_elem_is_i64;
+    bool     array_elem_is_f64;
     bool     int_unsigned;
     bool     is_bool;        // `bool` / `_Bool` (int_bits is 8 like char)
     bool     is_const;       // type was declared with the `const` qualifier
@@ -251,6 +252,7 @@ typedef struct {
     int64_t value;
     bool    is_default;
     size_t  body_start;
+    string  label;
 } SwitchCase;
 
 DEFINE_VECTOR_FOR_TYPE(SwitchCase, VecSwitchCase)

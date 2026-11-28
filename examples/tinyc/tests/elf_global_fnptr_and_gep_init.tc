@@ -1,0 +1,25 @@
+extern int printf(const char *fmt, ...);
+
+static const unsigned char tbl[6] = { 10, 20, 30, 40, 50, 60 };
+static const unsigned char *g_mid = &tbl[2];
+
+static int fn_a(int x) { return x + 1; }
+static int fn_b(int x) { return x * 3; }
+
+struct Reg {
+    const char *name;
+    int (*fn)(int);
+    void *tag;
+};
+
+static const struct Reg g_regs[] = {
+    { "a", fn_a, (void *)&((char *)0)[7] },
+    { "b", fn_b, (void *)&((char *)0)[11] },
+};
+
+int main(void) {
+    printf("%d %d\n", (int)g_mid[0], (int)g_mid[2]);
+    printf("%s %d %d\n", g_regs[0].name, g_regs[0].fn(5), (int)((char *)g_regs[0].tag - (char *)0));
+    printf("%s %d %d\n", g_regs[1].name, g_regs[1].fn(5), (int)((char *)g_regs[1].tag - (char *)0));
+    return 0;
+}

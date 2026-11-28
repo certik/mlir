@@ -134,7 +134,8 @@ bool llvm_global_init_bytes_relocs(MLIR_Context *ctx, MLIR_OpHandle gop,
             if (cur != MLIR_INVALID_HANDLE || MLIR_GetOpNumResults(ctx, op) != 1) return false;
             cur = MLIR_GetOpResult(ctx, op, 0);
         } else if (t == OP_TYPE_LLVM_MLIR_CONSTANT ||
-                   t == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                   t == OP_TYPE_LLVM_MLIR_ADDRESSOF ||
+                   t == OP_TYPE_LLVM_INTTOPTR) {
             // Read through the llvm.insertvalue that uses it.
         } else if (t == OP_TYPE_LLVM_INSERTVALUE) {
             if (cur == MLIR_INVALID_HANDLE || MLIR_GetOpNumOperands(ctx, op) != 2 ||
@@ -170,6 +171,11 @@ bool llvm_global_init_bytes_relocs(MLIR_Context *ctx, MLIR_OpHandle gop,
                 on_reloc(ud, off, ts);
                 cur = MLIR_GetOpResult(ctx, op, 0);
                 continue;
+            }
+            if (ct == OP_TYPE_LLVM_INTTOPTR && MLIR_GetOpNumOperands(ctx, c) == 1) {
+                c = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, c, 0));
+                if (c == MLIR_INVALID_HANDLE) return false;
+                ct = MLIR_GetOpType(ctx, c);
             }
             if (ct != OP_TYPE_LLVM_MLIR_CONSTANT) return false;
             MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, c, MLIR_KEY_VALUE);

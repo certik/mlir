@@ -52,8 +52,13 @@ typedef struct {
     // variables into unique module-scope global names.
     string cur_func_name;
     int    static_local_counter;
+    Stmt  *cur_switch;
+    int    switch_label_counter;
     uint16_t file_id_base;
 } P;
+
+static bool parse_sig_type(P *p, Type *out);
+static void wrap_ptr_to_ptr(P *p, Type *out);
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
 static TcTok peek(P *p, size_t k) { return p->toks[p->i + k < p->n ? p->i + k : p->n - 1]; }
@@ -750,6 +755,22 @@ static Expr *parse_primary(P *p) {
                 expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
                 return parse_postfix(p, e);
             }
+            if (str_eq(tc_tok_text(t), str_lit("__builtin_offsetof"))) {
+                p->i++; // '('
+                Type ty = {0};
+                if (!parse_abstract_type(p, &ty)) {
+                    perror_at(p, cur(p).line, str_lit("expected type in __builtin_offsetof"));
+                }
+                expect(p, TC_TK_COMMA, str_lit("expected ',' in __builtin_offsetof"));
+                TcTok fn = cur(p);
+                expect(p, TC_TK_IDENT, str_lit("expected field name in __builtin_offsetof"));
+                expect(p, TC_TK_RPAREN, str_lit("expected ')' in __builtin_offsetof"));
+                Expr *e = new_expr(p, EX_SIZEOF, t.line);
+                e->cast_type = arena_new(p->arena, Type);
+                *e->cast_type = ty;
+                e->name = tc_tok_text(fn);
+                return e;
+            }
             p->i++;
             Expr *e = new_expr(p, EX_CALL, t.line);
             e->name = tc_tok_text(t);
@@ -783,7 +804,7 @@ static Expr *parse_primary(P *p) {
     case TC_TK_STRING_LIT: {
         Expr *e = new_expr(p, EX_STR, t.line);
         e->name = parse_string_lits(p);
-        return e;
+        return parse_postfix(p, e);
     }
     case TC_TK_LPAREN: {
         TcTokKind nxt = peek(p, 1).kind;
@@ -870,6 +891,10 @@ static Expr *parse_primary(P *p) {
     case TC_TK_KW_NULL: {
         p->i++;
         return new_expr(p, EX_NULL, t.line);
+    }
+    case TC_TK_PLUS: {
+        p->i++;
+        return parse_primary(p);
     }
     case TC_TK_MINUS: {
         p->i++;
@@ -1301,8 +1326,23 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
                       ty.kind == TY_PTR_VOID || ty.kind == TY_PTR_PTR ||
                       ty.kind == TY_PTR_STRUCT || ty.kind == TY_FNPTR);
     bool is_struct = (ty.kind == TY_STRUCT);
-    if (!is_scalar && !is_struct) {
+    bool is_array = (ty.kind == TY_ARRAY_I32 || ty.kind == TY_ARRAY_F32 ||
+                     ty.kind == TY_ARRAY_STRUCT || ty.kind == TY_ARRAY_PTR_CHAR ||
+                     ty.kind == TY_ARRAY_PTR_STRUCT);
+    if (!is_scalar && !is_struct && !is_array) {
         return;
+    }
+    if (is_array && ds->expr && ds->expr->kind != EX_COMPOUND && ds->expr->kind != EX_STR) {
+        return;
+    }
+    if (is_array && ty.array_len == 0 && !ty.array_len_expr && ds->expr) {
+        if (ds->expr->kind == EX_COMPOUND) {
+            ty.array_len = (int64_t)ds->expr->extra->args.size;
+            ds->decl_type->array_len = ty.array_len;
+        } else if (ds->expr->kind == EX_STR) {
+            ty.array_len = (int64_t)ds->expr->name.size + 1;
+            ds->decl_type->array_len = ty.array_len;
+        }
     }
     Global g = (Global){0};
     int sid = ++p->static_local_counter;
@@ -1312,7 +1352,7 @@ static void promote_static_local(P *p, Stmt *ds, int line) {
     g.type = ty;
     g.line = line;
     g.is_static = true;
-    if (is_struct) {
+    if (is_struct || is_array) {
         if (ds->expr) {
             g.has_init = true;
             g.init_expr = ds->expr;
@@ -1429,6 +1469,7 @@ static Stmt *parse_decl(P *p, bool require_semi) {
     }
     // Typedef'd type-name takes precedence over manual parsing.
     if (cur(p).kind == TC_TK_IDENT && typedef_lookup(p, tc_tok_text(cur(p)))) {
+        Type base_td_ty = typedef_lookup(p, tc_tok_text(cur(p)))->ty;
         Type ty = {0};
         parse_sig_type(p, &ty);
         TcTok name = cur(p);
@@ -1472,17 +1513,24 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             blk->block_no_scope = true;
             VecStmtPtr_push_back(p->arena, &blk->body, s);
             while (accept(p, TC_TK_COMMA)) {
-                // Accept (and ignore) any leading `*`s that match the
-                // pointer-ness already absorbed into `ty` by parse_sig_type.
-                // This lets `Td *a, *b;` and `Td *a, **b;` declare a/b with
-                // the same pointer type as `Td*` / `Td**` without choking
-                // on the per-declarator `*` tokens.
-                while (cur(p).kind == TC_TK_STAR) p->i++;
+                int dstars = 0;
+                while (cur(p).kind == TC_TK_STAR) { dstars++; p->i++; skip_const(p); }
                 TcTok dname = cur(p);
                 expect(p, TC_TK_IDENT, str_lit("expected identifier"));
                 Stmt *ds = new_stmt(p, ST_DECL, dname.line);
                 ds->name = tc_tok_text(dname);
-                *ds->decl_type = ty;
+                Type dty = base_td_ty;
+                for (int si = 0; si < dstars; si++) {
+                    if (kind_is_ptr(dty.kind)) wrap_ptr_to_ptr(p, &dty);
+                    else if (dty.kind == TY_STRUCT) dty.kind = TY_PTR_STRUCT;
+                    else if (dty.kind == TY_VOID) dty.kind = TY_PTR_VOID;
+                    else if (dty.kind == TY_I32 && dty.int_bits == 8) { dty.kind = TY_PTR_CHAR; dty.int_bits = 0; }
+                    else if (dty.kind == TY_I64) { dty.kind = TY_PTR_I32; dty.ptr_is_i64 = true; }
+                    else if (dty.kind == TY_F32) { dty.kind = TY_PTR_I32; dty.ptr_is_f32 = true; }
+                    else if (dty.kind == TY_F64) { dty.kind = TY_PTR_I32; dty.ptr_is_f64 = true; }
+                    else dty.kind = TY_PTR_I32;
+                }
+                *ds->decl_type = dty;
                 // Optional `[N]` (or `[N][M]`) suffix on this declarator
                 // — promote the per-declarator type into the matching
                 // array kind, mirroring the first-declarator branch
@@ -1557,8 +1605,11 @@ static Stmt *parse_decl(P *p, bool require_semi) {
             }
             // Register in the program-level struct table (skipping
             // duplicates by tag name).
-            size_t dummy_idx = 0;
-            if (!idx_lookup(p->st_buckets, sd->name, &dummy_idx)) {
+            size_t existing_idx = 0;
+            if (idx_lookup(p->st_buckets, sd->name, &existing_idx)) {
+                if (p->prog->structs.data[existing_idx]->fields.size == 0)
+                    p->prog->structs.data[existing_idx] = sd;
+            } else {
                 size_t si = p->prog->structs.size;
                 VecStructDefPtr_push_back(p->arena, &p->prog->structs, sd);
                 idx_insert(p, p->st_buckets, sd->name, si);
@@ -1619,6 +1670,50 @@ static Stmt *parse_decl(P *p, bool require_semi) {
                 perror_at(p, line, str_lit("struct/array initializers are not supported"));
             }
             { Expr *agg = parse_aggregate_init(p, *s->decl_type); s->expr = agg ? agg : parse_assign_or_or(p); }
+        }
+        if (cur(p).kind == TC_TK_COMMA) {
+            Stmt *blk = new_stmt(p, ST_BLOCK, line);
+            blk->block_no_scope = true;
+            VecStmtPtr_push_back(p->arena, &blk->body, s);
+            while (accept(p, TC_TK_COMMA)) {
+                bool dis_ptr = accept(p, TC_TK_STAR);
+                bool dis_pp = dis_ptr && accept(p, TC_TK_STAR);
+                TcTok dname = cur(p);
+                expect(p, TC_TK_IDENT, str_lit("expected variable name"));
+                Stmt *ds = new_stmt(p, ST_DECL, dname.line);
+                ds->name = tc_tok_text(dname);
+                ds->decl_type->struct_name = tc_tok_text(sn);
+                if (accept(p, TC_TK_LBRACK)) {
+                    int64_t alen = 0; Expr *aexpr = NULL;
+                    parse_array_len_bracket(p, &alen, &aexpr);
+                    if (dis_ptr) {
+                        ds->decl_type->kind = TY_PTR_STRUCT;
+                        make_ptr_array(p, ds->decl_type, alen, aexpr);
+                    } else {
+                        ds->decl_type->kind = TY_ARRAY_STRUCT;
+                        ds->decl_type->array_len = alen;
+                        ds->decl_type->array_len_expr = aexpr;
+                    }
+                } else if (dis_pp) {
+                    Type *inner = arena_new(p->arena, Type);
+                    *inner = (Type){0};
+                    inner->kind = TY_PTR_STRUCT;
+                    inner->struct_name = tc_tok_text(sn);
+                    ds->decl_type->kind = TY_PTR_PTR;
+                    ds->decl_type->pointee = inner;
+                    ds->decl_type->struct_name = tc_tok_text(sn);
+                } else {
+                    ds->decl_type->kind = dis_ptr ? TY_PTR_STRUCT : TY_STRUCT;
+                }
+                if (accept(p, TC_TK_ASSIGN)) {
+                    Expr *agg = parse_aggregate_init(p, *ds->decl_type);
+                    ds->expr = agg ? agg : parse_assign_or_or(p);
+                }
+                VecStmtPtr_push_back(p->arena, &blk->body, ds);
+            }
+            if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
+            if (saw_static) promote_static_locals(p, blk, line);
+            return blk;
         }
         if (require_semi) expect(p, TC_TK_SEMI, str_lit("expected ';'"));
         if (saw_static) promote_static_locals(p, s, line);
@@ -1694,14 +1789,22 @@ static Stmt *parse_decl(P *p, bool require_semi) {
         perror_at(p, line, str_lit("'void' is not a valid variable type (did you mean 'void*'?)"));
     }
     if (accept(p, TC_TK_LBRACK)) {
-        if ((base != TY_I32 && !was_char && !is_ptr) || is_ptr_ptr) perror_at(p, line, str_lit("only int[N]/char[N]/T*[N] arrays are supported"));
+        if ((base != TY_I32 && base != TY_I64 && base != TY_F32 && base != TY_F64 &&
+             !was_char && !is_ptr) || is_ptr_ptr)
+            perror_at(p, line, str_lit("only int[N]/char[N]/T*[N] arrays are supported"));
         int64_t alen = 0; Expr *aexpr = NULL;
         parse_array_len_bracket(p, &alen, &aexpr);
         if (is_ptr) {
             // `T *name[N]`: an array of pointers.
             make_ptr_array(p, s->decl_type, alen, aexpr);
+        } else if (base == TY_F32 || base == TY_F64) {
+            s->decl_type->kind = TY_ARRAY_F32;
+            s->decl_type->array_elem_is_f64 = (base == TY_F64);
+            s->decl_type->array_len = alen;
+            s->decl_type->array_len_expr = aexpr;
         } else {
             s->decl_type->kind = TY_ARRAY_I32;
+            s->decl_type->array_elem_is_i64 = (base == TY_I64);
             s->decl_type->array_len = alen;
             s->decl_type->array_len_expr = aexpr;
         }
@@ -1932,6 +2035,47 @@ static Stmt *parse_stmt(P *p) {
         parse_block(p, &s->body);
         return s;
     }
+    if (t.kind == TC_TK_KW_CASE || t.kind == TC_TK_KW_DEFAULT) {
+        bool is_def = (t.kind == TC_TK_KW_DEFAULT);
+        p->i++;
+        int64_t cval = 0;
+        if (!is_def) {
+            int cline = cur(p).line;
+            Expr *cex = parse_ternary(p);
+            if (!parse_const_eval(p, cex, &cval)) {
+                perror_at(p, cline, str_lit("expected integer constant expression in 'case'"));
+            }
+            expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
+        } else {
+            expect(p, TC_TK_COLON, str_lit("expected ':' after default"));
+        }
+        int id = p->switch_label_counter++;
+        char *buf = arena_alloc(p->arena, 24);
+        buf[0] = '_'; buf[1] = '_'; buf[2] = 's'; buf[3] = 'w'; buf[4] = '_';
+        size_t pos = 5;
+        char tmp[16];
+        size_t tn = 0;
+        int v = id;
+        if (v == 0) tmp[tn++] = '0';
+        else { while (v > 0) { tmp[tn++] = (char)('0' + (v % 10)); v /= 10; } }
+        while (tn > 0) buf[pos++] = tmp[--tn];
+        buf[pos] = '\0';
+        string lbl = (string){.str = buf, .size = pos};
+        if (p->cur_switch) {
+            SwitchCase sc = (SwitchCase){
+                .value = cval,
+                .is_default = is_def,
+                .body_start = p->cur_switch->body.size,
+                .label = lbl,
+            };
+            VecSwitchCase_push_back(p->arena, &p->cur_switch->extra->switch_cases, sc);
+        } else {
+            perror_at(p, t.line, str_lit("'case'/'default' label not within a switch statement"));
+        }
+        Stmt *ls = new_stmt(p, ST_LABEL, t.line);
+        ls->name = lbl;
+        return ls;
+    }
     if (t.kind == TC_TK_KW_SWITCH) {
         p->i++;
         Stmt *s = new_stmt(p, ST_SWITCH, t.line);
@@ -1940,37 +2084,13 @@ static Stmt *parse_stmt(P *p) {
         expect(p, TC_TK_RPAREN, str_lit("expected ')'"));
         expect(p, TC_TK_LBRACE, str_lit("expected '{'"));
         VecSwitchCase_reserve(p->arena, &s->extra->switch_cases, 4);
+        Stmt *prev_sw = p->cur_switch;
+        p->cur_switch = s;
         while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
-            if (cur(p).kind == TC_TK_KW_CASE) {
-                p->i++;
-                int cline = cur(p).line;
-                Expr *cex = parse_ternary(p);
-                int64_t cval = 0;
-                if (!parse_const_eval(p, cex, &cval)) {
-                    perror_at(p, cline, str_lit("expected integer constant expression in 'case'"));
-                }
-                expect(p, TC_TK_COLON, str_lit("expected ':' after case"));
-                SwitchCase sc = (SwitchCase){
-                    .value = cval,
-                    .is_default = false,
-                    .body_start = s->body.size,
-                };
-                VecSwitchCase_push_back(p->arena, &s->extra->switch_cases, sc);
-                continue;
-            }
-            if (cur(p).kind == TC_TK_KW_DEFAULT) {
-                p->i++;
-                expect(p, TC_TK_COLON, str_lit("expected ':' after default"));
-                SwitchCase sc = (SwitchCase){
-                    .value = 0, .is_default = true,
-                    .body_start = s->body.size,
-                };
-                VecSwitchCase_push_back(p->arena, &s->extra->switch_cases, sc);
-                continue;
-            }
             Stmt *bs = parse_stmt(p);
             VecStmtPtr_push_back(p->arena, &s->body, bs);
         }
+        p->cur_switch = prev_sw;
         expect(p, TC_TK_RBRACE, str_lit("expected '}'"));
         return s;
     }
@@ -2294,8 +2414,11 @@ static bool parse_sig_type(P *p, Type *out) {
                 while (dn > 0) buf[n++] = digits[--dn];
                 sd->name = (string){.str = buf, .size = (size_t)n};
             }
-            size_t dummy_idx = 0;
-            if (!idx_lookup(p->st_buckets, sd->name, &dummy_idx)) {
+            size_t existing_idx = 0;
+            if (idx_lookup(p->st_buckets, sd->name, &existing_idx)) {
+                if (p->prog->structs.data[existing_idx]->fields.size == 0)
+                    p->prog->structs.data[existing_idx] = sd;
+            } else {
                 size_t si = p->prog->structs.size;
                 VecStructDefPtr_push_back(p->arena, &p->prog->structs, sd);
                 idx_insert(p, p->st_buckets, sd->name, si);
@@ -2542,6 +2665,23 @@ static Func *parse_func(P *p) {
                     // supported, but consuming the suffix lets the parser
                     // keep going.
                 }
+            }
+            // C array-to-pointer decay for typedef'd array parameters (e.g. `jmp_buf env`).
+            if (pty.kind == TY_ARRAY_I32) {
+                if (pty.int_bits == 8) { pty.kind = TY_PTR_CHAR; pty.int_bits = 0; }
+                else { pty.kind = TY_PTR_I32; pty.ptr_is_i64 = pty.array_elem_is_i64; }
+                pty.array_len = 0;
+            } else if (pty.kind == TY_ARRAY_F32) {
+                pty.kind = TY_PTR_I32;
+                pty.ptr_is_f32 = !pty.array_elem_is_f64;
+                pty.ptr_is_f64 = pty.array_elem_is_f64;
+                pty.array_len = 0;
+            } else if (pty.kind == TY_ARRAY_STRUCT) {
+                pty.kind = TY_PTR_STRUCT; pty.array_len = 0;
+            } else if (pty.kind == TY_ARRAY_PTR_CHAR) {
+                pty.kind = TY_PTR_CHAR; pty.array_len = 0; wrap_ptr_to_ptr(p, &pty);
+            } else if (pty.kind == TY_ARRAY_PTR_STRUCT) {
+                pty.kind = TY_PTR_STRUCT; pty.array_len = 0; wrap_ptr_to_ptr(p, &pty);
             }
             VecParam_push_back(p->arena, &f->params,
                 ((Param){.name = pname, .type = pty, .line = cur(p).line}));
@@ -2800,30 +2940,46 @@ static StructDef *parse_struct_def(P *p) {
                 str_lit("'void' is not a valid struct field type"));
         }
         // One or more comma-separated declarators sharing the base type
-        // `ft` parsed above. Each may add its own `[N]`/`[N][M]` suffix.
-        // The base-type code above applied the first declarator's `*`s to
-        // every declarator, so a later one must repeat them exactly, e.g.
-        //   const uint8_t *p, *end;
-        // We don't model declarators with different pointer levels
-        // (`int *a, b;`, `struct S *a, **b;`), nor a pointer level the
-        // base-type code does not (`int ***p;`): they are rejected rather
-        // than given the wrong type.
-        Type first_ft = ft;
-        Type base_ft = first_is_fnptr ? plain_ft : ft;
-        size_t base_stars = 0;
+        // `ft` parsed above. Each may add its own `*`s and `[N]`/`[N][M]` suffix.
+        Type unstarred_ft = plain_ft;
         if (!first_is_fnptr) {
-            while (base_stars < p->i && p->toks[p->i - 1 - base_stars].kind == TC_TK_STAR)
-                base_stars++;
+            size_t lead_stars = 0;
+            while (lead_stars < p->i && p->toks[p->i - 1 - lead_stars].kind == TC_TK_STAR)
+                lead_stars++;
+            if (lead_stars > 0) {
+                Type u = plain_ft;
+                for (size_t si = 0; si < lead_stars; si++) {
+                    if (u.kind == TY_PTR_PTR && u.pointee) u = *u.pointee;
+                    else if (u.kind == TY_PTR_STRUCT) u.kind = TY_STRUCT;
+                    else if (u.kind == TY_PTR_VOID) u.kind = TY_VOID;
+                    else if (u.kind == TY_PTR_CHAR) { u.kind = TY_I32; u.int_bits = 8; }
+                    else if (u.kind == TY_PTR_I32) {
+                        if (u.ptr_is_i64) { u.kind = TY_I64; u.ptr_is_i64 = false; }
+                        else if (u.ptr_is_f32) { u.kind = TY_F32; u.ptr_is_f32 = false; }
+                        else if (u.ptr_is_f64) { u.kind = TY_F64; u.ptr_is_f64 = false; }
+                        else { u.kind = TY_I32; }
+                    }
+                }
+                unstarred_ft = u;
+            }
         }
+        Type first_ft = ft;
         bool more_decls = true;
         bool first_decl = true;
         while (more_decls) {
-            Type ft = first_decl ? first_ft : base_ft;
+            Type ft = first_decl ? first_ft : unstarred_ft;
             size_t stars = 0;
-            while (accept(p, TC_TK_STAR)) stars++;
-            if (stars != (first_decl ? 0 : base_stars)) {
-                perror_at(p, cur(p).line,
-                    str_lit("unsupported pointer level in a struct field declarator"));
+            while (accept(p, TC_TK_STAR)) { stars++; skip_const(p); }
+            if (!first_decl && stars > 0) {
+                if (ft.kind == TY_STRUCT) ft.kind = TY_PTR_STRUCT;
+                else if (ft.kind == TY_VOID) ft.kind = TY_PTR_VOID;
+                else if (ft.kind == TY_I32 && ft.int_bits == 8) ft.kind = TY_PTR_CHAR;
+                else if (ft.kind == TY_I32) ft.kind = TY_PTR_I32;
+                else if (ft.kind == TY_I64) { ft.kind = TY_PTR_I32; ft.ptr_is_i64 = true; }
+                else if (ft.kind == TY_F32) { ft.kind = TY_PTR_I32; ft.ptr_is_f32 = true; }
+                else if (ft.kind == TY_F64) { ft.kind = TY_PTR_I32; ft.ptr_is_f64 = true; }
+                else if (kind_is_ptr(ft.kind) || ft.kind == TY_FNPTR) wrap_ptr_to_ptr(p, &ft);
+                for (size_t si = 1; si < stars; si++) wrap_ptr_to_ptr(p, &ft);
             }
             if (!first_decl && cur(p).kind == TC_TK_LPAREN &&
                 peek(p, 1).kind == TC_TK_STAR) {
@@ -3287,6 +3443,25 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         if ((cur(&p).kind == TC_TK_KW_STRUCT || cur(&p).kind == TC_TK_KW_UNION) &&
             (peek(&p, 1).kind == TC_TK_LBRACE ||
              (peek(&p, 1).kind == TC_TK_IDENT && peek(&p, 2).kind == TC_TK_LBRACE))) {
+            // Check whether `;` immediately follows the closing `}` (standalone
+            // struct/union definition) vs a declarator (`struct S { ... } var;`).
+            size_t bk = (peek(&p, 1).kind == TC_TK_LBRACE) ? 1 : 2;
+            int bdepth = 0;
+            bool is_standalone_def = true;
+            while (p.i + bk < p.n) {
+                TcTokKind tk = p.toks[p.i + bk].kind;
+                if (tk == TC_TK_LBRACE) bdepth++;
+                else if (tk == TC_TK_RBRACE) {
+                    bdepth--;
+                    if (bdepth == 0) {
+                        is_standalone_def = (p.i + bk + 1 < p.n &&
+                                             p.toks[p.i + bk + 1].kind == TC_TK_SEMI);
+                        break;
+                    }
+                }
+                bk++;
+            }
+            if (is_standalone_def) {
             StructDef *sd = parse_struct_def(&p);
             expect(&p, TC_TK_SEMI, str_lit("expected ';' after struct definition"));
             // Dedup against existing struct of the same name (cross-file
@@ -3311,6 +3486,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     str_lit("conflicting redefinition of struct"));
             }
             continue;
+            }
         }
         // Forward declaration of an opaque struct: `struct Tag;` — no body.
         // We register a StructDef with no fields so that TY_PTR_STRUCT
@@ -3605,6 +3781,8 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                                        gex->lhs->kind == EX_UN && gex->lhs->op == OP_NEG &&
                                        gex->lhs->lhs && gex->lhs->lhs->kind == EX_FLOAT) {
                                 g.init_float = -gex->lhs->lhs->val.float_value;
+                            } else if (gex && kind_is_ptr(g.type.kind)) {
+                                g.init_expr = gex;
                             } else {
                                 p.i = init_save;
                                 perror_at(&p, lit.line,

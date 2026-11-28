@@ -512,7 +512,7 @@ static MLIR_TypeHandle array_elem_type(E *e, const Type *t) {
         if (sd) return find_struct_type(e, sd);
         return e->i32;
     }
-    if (t->kind == TY_ARRAY_F32) return e->f32;
+    if (t->kind == TY_ARRAY_F32) return t->array_elem_is_f64 ? e->f64 : e->f32;
     if (t->kind == TY_ARRAY_PTR_STRUCT || t->kind == TY_ARRAY_PTR_CHAR) return e->ptr;
     if (t->array_elem_is_i64) return e->i64;
     return int_mem_type(e, t);
@@ -1342,6 +1342,7 @@ static MLIR_ValueHandle int_to_ptr(E *e, EVal v) {
 
 static EVal emit_expr(E *e, Scope *sc, Expr *ex);
 static int64_t type_size(E *e, Type t);
+static int64_t struct_field_offset(E *e, StructDef *sd, string fname);
 static int64_t type_align(E *e, Type t);
 static int64_t c_sizeof_expr(E *e, Scope *sc, Expr *ex);
 
@@ -2475,7 +2476,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
                 r.elem_ty = e->ptr;
                 return r;
             }
-            if (s->type.kind != TY_ARRAY_I32) {
+            if (s->type.kind != TY_ARRAY_I32 && s->type.kind != TY_ARRAY_F32) {
                 EMIT_ERR(e, "indexing of non-array variable");
                 return r;
             }
@@ -3330,6 +3331,12 @@ static bool emit_fold_leaf(void *ctx, Expr *ex, bool lenient, FoldVal *out) {
         *out = fold_size(fc->e, 0);
         return true;
     }
+    if (ex->name.size > 0 && ex->cast_type && ex->cast_type->kind == TY_STRUCT) {
+        StructDef *sd = find_struct(fc->e, ex->cast_type->struct_name);
+        if (!sd) return false;
+        *out = fold_size(fc->e, struct_field_offset(fc->e, sd, ex->name));
+        return true;
+    }
     Type ty = (Type){0};
     if (ex->sizeof_is_expr) {
         if (!fc->sc) return false;
@@ -3660,7 +3667,8 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                 case TY_PTR_VOID:
                 case TY_PTR_I32:
                 case TY_PTR_STRUCT:
-                case TY_PTR_PTR:    rt = e->ptr; break;
+                case TY_PTR_PTR:
+                case TY_FNPTR:      rt = e->ptr; break;
                 default:
                     EMIT_ERR(e, "va_arg only supports int, long, and pointer types");
                     r.val = emit_const_i32(e, 0); return r;
@@ -3674,10 +3682,12 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
             r.is_float = (tk == TY_F64);
             r.is_f64 = (tk == TY_F64);
             r.is_ptr = (tk == TY_PTR_CHAR || tk == TY_PTR_VOID || tk == TY_PTR_I32
-                        || tk == TY_PTR_STRUCT || tk == TY_PTR_PTR);
+                        || tk == TY_PTR_STRUCT || tk == TY_PTR_PTR || tk == TY_FNPTR);
             r.is_str = (tk == TY_PTR_CHAR);
             r.is_void_ptr = (tk == TY_PTR_VOID);
             r.ptr_elem = ptr_elem_of_type(e, ex->cast_type);
+            if (tk == TY_PTR_STRUCT) r.sdef = find_struct(e, ex->cast_type->struct_name);
+            if (tk == TY_FNPTR) r.fnptr_ty = ex->cast_type;
             return r;
         }
         case EX_STR: {
@@ -3767,7 +3777,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         }
         case EX_SIZEOF: {
             int64_t n = 1;
-            if (ex->sizeof_is_expr) {
+            if (ex->name.size > 0 && ex->cast_type && ex->cast_type->kind == TY_STRUCT) {
+                StructDef *sd = find_struct(e, ex->cast_type->struct_name);
+                if (!sd) {
+                    EMIT_ERR(e, "unknown struct in offsetof");
+                } else {
+                    n = struct_field_offset(e, sd, ex->name);
+                }
+            } else if (ex->sizeof_is_expr) {
                 if (ex->lhs && ex->lhs->kind == EX_STR) {
                     n = ex->is_alignof ? 1 : (int64_t)ex->lhs->name.size;
                 } else if (infer_expr_type(e, sc, ex->lhs).kind == TY_VOID) {
@@ -3935,6 +3952,14 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
         case EX_INDEX:
         case EX_DEREF:
         case EX_FIELD: {
+            // In C, dereferencing a function pointer (`*f`) is a no-op and
+            // yields the same function pointer value (e.g. `(*f)(args)`).
+            if (ex->kind == EX_DEREF) {
+                Type dt = infer_expr_type(e, sc, ex->lhs);
+                if (dt.kind == TY_FNPTR) {
+                    return emit_expr(e, sc, ex->lhs);
+                }
+            }
             // Bare function name (no call): decay to a function-pointer
             // value via `llvm.mlir.addressof @sym : !llvm.ptr`. Tag the
             // result with a TY_FNPTR carrying the function's signature so
@@ -4223,6 +4248,39 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                     }
                 }
             }
+            // 1D indexing of a 2D array field (`s.m[i]`): decays to a pointer
+            // to the row's first element `&s.m[i][0]`.
+            if (ex->kind == EX_INDEX && ex->lhs->kind == EX_FIELD) {
+                Type f2 = (Type){0};
+                if (field_type_noemit(e, sc, ex->lhs, &f2) && f2.array_len2 != 0 &&
+                    (f2.kind == TY_ARRAY_I32 || f2.kind == TY_ARRAY_F32 ||
+                     f2.kind == TY_ARRAY_PTR_STRUCT || f2.kind == TY_ARRAY_PTR_CHAR)) {
+                    SCtx parent = walk_struct_lhs(e, sc, ex->lhs->lhs);
+                    if (parent.ok) {
+                        int fidx = struct_field_index(parent.sd, ex->lhs->name);
+                        if (fidx >= 0) {
+                            MLIR_ValueHandle iv = emit_expr_i32(e, sc, ex->rhs);
+                            size_t parent_n = parent.n_const_path;
+                            size_t total = parent_n + 3;
+                            int32_t *path = arena_new_array(e->arena, int32_t, total);
+                            for (size_t k = 0; k < parent_n; k++) path[k] = sctx_path(&parent)[k];
+                            path[parent_n] = struct_llvm_field(parent.sd, fidx);
+                            path[parent_n + 1] = LLVM_GEP_DYN;
+                            path[parent_n + 2] = 0;
+                            size_t n_dyn = (parent.dyn_index != MLIR_INVALID_HANDLE ? 1 : 0) + 1;
+                            MLIR_ValueHandle *dyn = arena_new_array(e->arena, MLIR_ValueHandle, n_dyn);
+                            size_t di = 0;
+                            if (parent.dyn_index != MLIR_INVALID_HANDLE) dyn[di++] = parent.dyn_index;
+                            dyn[di++] = iv;
+                            r.val = emit_gep(e, parent.base_ptr, parent.source_elem,
+                                             path, total, dyn, n_dyn);
+                            r.is_ptr = true;
+                            r.ptr_elem = array_elem_type(e, &f2);
+                            return r;
+                        }
+                    }
+                }
+            }
             LVal lv = emit_lvalue(e, sc, ex);
             EVal v = load_lvalue(e, lv);
             // Tag the resulting pointer with its target StructDef, when
@@ -4469,6 +4527,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                             return r;
                         }
                     }
+                }
+                if (lt.kind == TY_ARRAY_I32 || lt.kind == TY_ARRAY_F32 ||
+                    lt.kind == TY_ARRAY_STRUCT || lt.kind == TY_ARRAY_PTR_STRUCT ||
+                    lt.kind == TY_ARRAY_PTR_CHAR) {
+                    return emit_expr(e, sc, ex->lhs);
                 }
                 // Scalar field: fall back to emit_lvalue.
                 LVal lv = emit_lvalue(e, sc, ex->lhs);
@@ -5749,6 +5812,11 @@ static void emit_expr_for_side_effect(E *e, Scope *sc, Expr *ex) {
         emit_expr_for_side_effect(e, sc, ex->lhs);
         return;
     }
+    if (ex->kind == EX_BIN && ex->op == OP_COMMA) {
+        emit_expr_for_side_effect(e, sc, ex->lhs);
+        emit_expr_for_side_effect(e, sc, ex->rhs);
+        return;
+    }
     if (ex->kind == EX_TERNARY &&
         expr_is_void_statement(e, ex->rhs) &&
         expr_is_void_statement(e, ex->lvalue)) {
@@ -5848,20 +5916,32 @@ static void declare_without_init(E *e, Scope *sc, Stmt *st) {
     // initializer still applies here. (A scalar static was promoted to a
     // global by the parser and has no initializer left on the Stmt.)
     if (st->decl_is_static) {
+        MLIR_BlockHandle saved_blk = e->cur_block;
+        bool was_term = e->terminated;
+        e->cur_block = MLIR_INVALID_HANDLE;
+        e->terminated = false;
         emit_stmt(e, sc, st);
+        e->cur_block = saved_blk;
+        e->terminated = was_term;
         return;
     }
     // The initializer of an unsized array also gives its length.
     infer_unsized_array_len(e, st);
     Expr *init = st->expr;
     st->expr = NULL;
+    MLIR_BlockHandle saved_blk = e->cur_block;
+    bool was_term = e->terminated;
+    e->cur_block = MLIR_INVALID_HANDLE;
+    e->terminated = false;
     emit_stmt(e, sc, st);
+    e->cur_block = saved_blk;
+    e->terminated = was_term;
     st->expr = init;
 }
 
 static void emit_stmt(E *e, Scope *sc, Stmt *st) {
     if (e->err_count > 0) return;
-    if (e->terminated && st->kind != ST_LABEL) return;
+    if (e->terminated && st->kind != ST_LABEL && st->kind != ST_BLOCK) return;
     e->cur_line = st->line;
     e->cur_file_id = st->file_id;
     switch (st->kind) {
@@ -5880,6 +5960,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             // name to that global; do not allocate a stack slot and do
             // not re-emit the initializer (the Global captures it).
             if (st->extra && st->extra->decl_static_global_sym.size > 0) {
+                resolve_array_len(e, sc, st->decl_type);
+                sy->type.array_len = st->decl_type->array_len;
                 sy->is_global = true;
                 sy->global_sym = st->extra->decl_static_global_sym;
                 if (sy->type.kind == TY_STRUCT || sy->type.kind == TY_PTR_STRUCT ||
@@ -6018,7 +6100,8 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                         }
                     }
                 }
-            } else if (st->decl_type->kind == TY_ARRAY_I32) {
+            } else if (st->decl_type->kind == TY_ARRAY_I32 ||
+                       st->decl_type->kind == TY_ARRAY_F32) {
                 MLIR_TypeHandle elem_ty = array_elem_type(e, st->decl_type);
                 MLIR_TypeHandle arr_ty = array_mlir_type(e, st->decl_type);
                 sy->addr = emit_alloca(e, arr_ty);
@@ -6066,12 +6149,32 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                 is_zero_init = true;
                             }
                         }
-                        if (!is_zero_init && st->decl_type->array_len2 == 0) {
+                        if (!is_zero_init) {
                             is_list_init = true;
                         }
                     }
                     if (!is_zero_init && !is_list_init) {
                         EMIT_ERR(e, "array initializers are not supported");
+                    } else if (is_list_init && st->decl_type->array_len2 != 0) {
+                        int64_t n1 = st->decl_type->array_len;
+                        int64_t n2 = st->decl_type->array_len2;
+                        MLIR_ValueHandle z = emit_zero_of(e, elem_ty);
+                        size_t nr = st->expr->extra->args.size;
+                        for (int64_t r0 = 0; r0 < n1; r0++) {
+                            Expr *row = (r0 < (int64_t)nr) ? st->expr->extra->args.data[r0] : NULL;
+                            size_t nc = (row && row->kind == EX_COMPOUND) ? row->extra->args.size : 0;
+                            for (int64_t c0 = 0; c0 < n2; c0++) {
+                                MLIR_ValueHandle iv = z;
+                                if (row && row->kind == EX_COMPOUND && c0 < (int64_t)nc) {
+                                    iv = coerce_eval_to(e,
+                                        emit_expr(e, sc, row->extra->args.data[c0]),
+                                        elem_ty, *st->decl_type);
+                                }
+                                int32_t path[3] = {0, (int32_t)r0, (int32_t)c0};
+                                MLIR_ValueHandle p = emit_gep(e, sy->addr, arr_ty, path, 3, NULL, 0);
+                                emit_store_v(e, iv, p);
+                            }
+                        }
                     } else if (is_list_init) {
                         size_t n = st->expr->extra->args.size;
                         if ((int64_t)n != st->decl_type->array_len) {
@@ -6629,8 +6732,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
         }
         case ST_BLOCK: {
             if (st->block_no_scope) {
-                for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                    emit_stmt(e, sc, st->body.data[i]);
+                emit_block(e, sc, st->body);
                 return;
             }
             Scope inner = (Scope){.head = NULL, .parent = sc};
@@ -6646,16 +6748,14 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
 
             e->cur_block = then_b; e->terminated = false;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
-              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->body.data[i]);
+              emit_block(e, &inner, st->body);
               scope_pop(e, &inner); }
             emit_branch(e, end_b);
 
             if (st->has_else) {
                 e->cur_block = else_b; e->terminated = false;
                 Scope inner = (Scope){.head = NULL, .parent = sc};
-                for (size_t i = 0; i < st->extra->else_body.size && !e->terminated; i++)
-                    emit_stmt(e, &inner, st->extra->else_body.data[i]);
+                emit_block(e, &inner, st->extra->else_body);
                 scope_pop(e, &inner);
                 emit_branch(e, end_b);
             }
@@ -6676,8 +6776,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             LoopCtx lc = (LoopCtx){.continue_block = hdr_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
-              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->body.data[i]);
+              emit_block(e, &inner, st->body);
               scope_pop(e, &inner); }
             e->loops = lc.parent;
             emit_branch(e, hdr_b);
@@ -6697,8 +6796,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             LoopCtx lc = (LoopCtx){.continue_block = cond_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
             { Scope inner = (Scope){.head = NULL, .parent = sc};
-              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &inner, st->body.data[i]);
+              emit_block(e, &inner, st->body);
               scope_pop(e, &inner); }
             e->loops = lc.parent;
             emit_branch(e, cond_b);
@@ -6735,8 +6833,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             LoopCtx lc = (LoopCtx){.continue_block = step_b, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
             { Scope body = (Scope){.head = NULL, .parent = &inner};
-              for (size_t i = 0; i < st->body.size && !e->terminated; i++)
-                  emit_stmt(e, &body, st->body.data[i]);
+              emit_block(e, &body, st->body);
               scope_pop(e, &body); }
             e->loops = lc.parent;
             emit_branch(e, step_b);
@@ -6752,39 +6849,24 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             return;
         }
         case ST_SWITCH: {
-            // Lower switch as a chain of cf.cond_br tests followed by case
-            // bodies that fall through to the next case unless terminated by
-            // a `break`. Multiple SwitchCase entries pointing at the same
-            // body_start share one CFG block.
+            // Lower switch as a chain of cf.cond_br tests branching directly
+            // to each case/default's pre-registered ST_LABEL block, followed
+            // by emitting the switch body (which may contain case/default
+            // labels inside nested blocks, like Duff's device or SQLite's
+            // sqlite3VdbeExec).
             EVal cv = emit_expr(e, sc, st->expr);
             MLIR_ValueHandle cond_v = cv.val;
 
             size_t nc = st->extra->switch_cases.size;
-            // Statements before the first case label never run, but a
-            // declaration among them is in scope for the rest of the body
-            // (`switch (x) { int t; case 1: t = ...; }`). Declare those
-            // names without running their initializers; skip the rest.
-            Scope inner = (Scope){.head = NULL, .parent = sc};
-            int64_t first_case = nc ? st->extra->switch_cases.data[0].body_start
-                                    : (int64_t)st->body.size;
-            for (int64_t k = 0; k < first_case; k++)
-                declare_without_init(e, &inner, st->body.data[k]);
-
             MLIR_BlockHandle exit_b = new_cfg_block(e);
 
-            // Per-case body block, one per unique body_start (switch_cases
-            // is already in non-decreasing body_start source order).
             MLIR_BlockHandle *case_blocks = arena_new_array(e->arena, MLIR_BlockHandle, nc ? nc : 1);
-            int64_t *body_start = arena_new_array(e->arena, int64_t, nc ? nc : 1);
             MLIR_BlockHandle default_b = MLIR_INVALID_HANDLE;
             for (size_t i = 0; i < nc; i++) {
-                int64_t bs = st->extra->switch_cases.data[i].body_start;
-                body_start[i] = bs;
-                if (i > 0 && body_start[i - 1] == bs) {
-                    case_blocks[i] = case_blocks[i - 1];
-                } else {
-                    case_blocks[i] = new_cfg_block(e);
-                }
+                string lbl = st->extra->switch_cases.data[i].label;
+                struct LabelBlock *lb = e->labels;
+                while (lb && !str_eq(lb->name, lbl)) lb = lb->next;
+                case_blocks[i] = lb ? lb->block : exit_b;
                 if (st->extra->switch_cases.data[i].is_default &&
                     default_b == MLIR_INVALID_HANDLE) {
                     default_b = case_blocks[i];
@@ -6817,27 +6899,16 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                 }
             }
 
-            // Determine the contiguous stmt range for each case block.
-            // Inherit `continue` target from any enclosing loop.
+            // Emit the switch body with `terminated = true` initially so
+            // unreachable code before the first case is skipped (while
+            // declarations before the first case are still declared via
+            // declare_without_init).
             MLIR_BlockHandle cont_target = e->loops ? e->loops->continue_block : MLIR_INVALID_HANDLE;
             LoopCtx lc = (LoopCtx){.continue_block = cont_target, .break_block = exit_b, .parent = e->loops};
             e->loops = &lc;
-            for (size_t i = 0; i < nc; i++) {
-                // Skip duplicate entries pointing at a body_start already emitted.
-                if (i > 0 && body_start[i] == body_start[i - 1]) continue;
-                e->cur_block = case_blocks[i]; e->terminated = false;
-                size_t next_i = i + 1;
-                while (next_i < nc && body_start[next_i] == body_start[i]) next_i++;
-                int64_t end = (next_i < nc) ? body_start[next_i] : (int64_t)st->body.size;
-                for (int64_t k = body_start[i]; k < end && !e->terminated; k++) {
-                    emit_stmt(e, &inner, st->body.data[k]);
-                }
-                // Fall through to the next case block in source order, or exit.
-                if (!e->terminated) {
-                    MLIR_BlockHandle nxt = (next_i < nc) ? case_blocks[next_i] : exit_b;
-                    emit_branch(e, nxt);
-                }
-            }
+            Scope inner = (Scope){.head = NULL, .parent = sc};
+            emit_block(e, &inner, st->body);
+            if (!e->terminated) emit_branch(e, exit_b);
             scope_pop(e, &inner);
             e->loops = lc.parent;
             e->cur_block = exit_b; e->terminated = false;
@@ -6846,10 +6917,31 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
     }
 }
 
+static bool stmt_has_label(Stmt *st) {
+    if (!st) return false;
+    if (st->kind == ST_LABEL) return true;
+    for (size_t i = 0; i < st->body.size; i++) {
+        if (stmt_has_label(st->body.data[i])) return true;
+    }
+    if (st->extra) {
+        for (size_t i = 0; i < st->extra->else_body.size; i++) {
+            if (stmt_has_label(st->extra->else_body.data[i])) return true;
+        }
+    }
+    return false;
+}
+
 static void emit_block(E *e, Scope *sc, VecStmtPtr body) {
     for (size_t i = 0; i < body.size; i++) {
         Stmt *st = body.data[i];
-        if (e->terminated && st->kind != ST_LABEL) continue;
+        if (e->terminated) {
+            if (st->kind == ST_DECL || (st->kind == ST_BLOCK && st->block_no_scope)) {
+                declare_without_init(e, sc, st);
+                continue;
+            }
+            if (st->kind != ST_LABEL && !(st->kind == ST_BLOCK && stmt_has_label(st)))
+                continue;
+        }
         emit_stmt(e, sc, st);
     }
 }
@@ -7358,7 +7450,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
                 }
                 return int_elem_ctype(&inner);
             }
-            if ((inner.kind == TY_ARRAY_I32 || inner.kind == TY_ARRAY_F32) &&
+            if ((inner.kind == TY_ARRAY_I32 || inner.kind == TY_ARRAY_F32 ||
+                 inner.kind == TY_ARRAY_PTR_STRUCT || inner.kind == TY_ARRAY_PTR_CHAR ||
+                 inner.kind == TY_ARRAY_STRUCT) &&
                 inner.array_len2) {
                 // `*m` of a 2D array is its first row, a 1D array.
                 inner.array_len = inner.array_len2;
@@ -7422,7 +7516,9 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
         }
         case EX_INDEX: {
             Type base = infer_expr_type(e, sc, ex->lhs);
-            if ((base.kind == TY_ARRAY_I32 || base.kind == TY_ARRAY_F32) && base.array_len2) {
+            if ((base.kind == TY_ARRAY_I32 || base.kind == TY_ARRAY_F32 ||
+                 base.kind == TY_ARRAY_PTR_STRUCT || base.kind == TY_ARRAY_PTR_CHAR ||
+                 base.kind == TY_ARRAY_STRUCT) && base.array_len2) {
                 // A row `m[i]` of a 2D array is a 1D array.
                 base.array_len = base.array_len2;
                 base.array_len2 = 0;
@@ -7553,6 +7649,24 @@ static Type infer_expr_type(E *e, Scope *sc, Expr *ex) {
     }
 }
 
+static int64_t struct_field_offset(E *e, StructDef *sd, string fname) {
+    if (!sd || sd->is_union) return 0;
+    struct_compute_layout(sd);
+    int64_t off = 0;
+    for (size_t i = 0; i < sd->fields.size; i++) {
+        StructField *sf = &sd->fields.data[i];
+        if (sf->is_bitfield && (sf->bit_width == 0 || sf->bit_offset > 0)) continue;
+        Type ft = sf->type;
+        int64_t fa = type_align(e, ft);
+        int64_t fs = type_size(e, ft);
+        if (fa > 0) off = (off + fa - 1) / fa * fa;
+        if (str_eq(sf->name, fname)) return off;
+        off += fs;
+    }
+    EMIT_ERR(e, "unknown field '{}' in offsetof", fname);
+    return 0;
+}
+
 static int64_t type_size(E *e, Type t) {
     int64_t ptr_sz = e->target_wasm32 ? 4 : 8;
     if (t.kind == TY_I32) return tinyc_int_size(&t);
@@ -7564,7 +7678,8 @@ static int64_t type_size(E *e, Type t) {
     if (t.kind == TY_PTR_PTR) return ptr_sz;
     if (t.kind == TY_ARRAY_I32)
         return tinyc_int_size(&t) * t.array_len * (t.array_len2 ? t.array_len2 : 1);
-    if (t.kind == TY_ARRAY_F32) return 4 * t.array_len * (t.array_len2 ? t.array_len2 : 1);
+    if (t.kind == TY_ARRAY_F32)
+        return (t.array_elem_is_f64 ? 8 : 4) * t.array_len * (t.array_len2 ? t.array_len2 : 1);
     if (t.kind == TY_ARRAY_PTR_STRUCT || t.kind == TY_ARRAY_PTR_CHAR)
         return ptr_sz * t.array_len * (t.array_len2 ? t.array_len2 : 1);
     if (t.kind == TY_STRUCT) {
@@ -7633,7 +7748,7 @@ static int64_t type_align(E *e, Type t) {
     if (t.kind == TY_PTR_I32 || t.kind == TY_PTR_STRUCT) return ptr_a;
     if (t.kind == TY_PTR_CHAR || t.kind == TY_PTR_VOID || t.kind == TY_FNPTR) return ptr_a;
     if (t.kind == TY_PTR_PTR) return ptr_a;
-    if (t.kind == TY_ARRAY_F32) return 4;
+    if (t.kind == TY_ARRAY_F32) return t.array_elem_is_f64 ? 8 : 4;
     if (t.kind == TY_ARRAY_PTR_STRUCT || t.kind == TY_ARRAY_PTR_CHAR) return ptr_a;
     if (t.kind == TY_STRUCT) {
         StructDef *sd = find_struct(e, t.struct_name);
@@ -7901,6 +8016,31 @@ static bool gconst_eval(E *e, Expr *ex, GConst *out) {
         *out = a;
         return true;
     }
+    if (ex->kind == EX_ADDR && ex->lhs && ex->lhs->kind == EX_INDEX) {
+        // `&((char*)0)[X]` (SQLITE_INT_TO_PTR idiom): constant byte offset X.
+        GConst base_c, idx_c;
+        if (gconst_eval(e, ex->lhs->lhs, &base_c) && !base_c.is_float && base_c.i.v == 0 &&
+            gconst_eval(e, ex->lhs->rhs, &idx_c) && !idx_c.is_float) {
+            *out = idx_c;
+            return true;
+        }
+    }
+    if (ex->kind == EX_BIN &&
+        (ex->op == OP_ADD || ex->op == OP_SUB || ex->op == OP_MUL || ex->op == OP_DIV)) {
+        GConst a, b;
+        if (gconst_eval(e, ex->lhs, &a) && gconst_eval(e, ex->rhs, &b) &&
+            (a.is_float || b.is_float)) {
+            double fa = gconst_to_float(a, false);
+            double fb = gconst_to_float(b, false);
+            out->is_float = true;
+            if (ex->op == OP_ADD) out->f = fa + fb;
+            else if (ex->op == OP_SUB) out->f = fa - fb;
+            else if (ex->op == OP_MUL) out->f = fa * fb;
+            else if (fb != 0.0) out->f = fa / fb;
+            else return false;
+            return true;
+        }
+    }
     return ast_fold(e, NULL, ex, &out->i);
 }
 
@@ -8031,6 +8171,19 @@ static MLIR_ValueHandle ginit_emit(GInit *gi, MLIR_TypeHandle agg_ty, MLIR_Value
                                 MLIR_CreateAttributeSymbolRef(e->ctx, sl->ptr_sym));
             emit_op(e, OP_TYPE_LLVM_MLIR_ADDRESSOF,
                     crts, 1, crs, 1, NULL, 0, cas, 1, NULL, 0);
+        } else if (sl->ty == e->ptr) {
+            MLIR_ValueHandle iv = MLIR_INVALID_HANDLE;
+            MLIR_TypeHandle *irts = arena_new_array(e->arena, MLIR_TypeHandle, 1); irts[0] = e->i64;
+            MLIR_ValueHandle *irs = &iv;
+            MLIR_NamedAttr *ias = arena_new_array(e->arena, MLIR_NamedAttr, 1);
+            ias[0] = MLIR_Named(MLIR_KEY_VALUE, sl->val);
+            emit_op(e, OP_TYPE_LLVM_MLIR_CONSTANT,
+                    irts, 1, irs, 1, NULL, 0, ias, 1, NULL, 0);
+            MLIR_TypeHandle *prts = arena_new_array(e->arena, MLIR_TypeHandle, 1); prts[0] = e->ptr;
+            MLIR_ValueHandle *prs = &c;
+            MLIR_ValueHandle *iops = arena_new_array(e->arena, MLIR_ValueHandle, 1); iops[0] = iv;
+            emit_op(e, OP_TYPE_LLVM_INTTOPTR,
+                    prts, 1, prs, 1, iops, 1, NULL, 0, NULL, 0);
         } else {
             MLIR_TypeHandle *crts = arena_new_array(e->arena, MLIR_TypeHandle, 1); crts[0] = sl->ty;
             MLIR_ValueHandle *crs = &c;
@@ -8064,44 +8217,125 @@ static bool ginit_push(GInit *gi, int64_t idx) {
     return true;
 }
 
+// Resolve a constant pointer initializer expression (`"str"`, `&g`, `g_arr`,
+// `&g_arr[const_expr]`, `g_arr + const_expr`, `fn`, casts thereof) to
+// `(symbol_name, byte_offset)`. Returns false if not a constant symbol address.
+static bool gconst_ptr_addr(E *e, Expr *ex, string *out_sym, int64_t *out_off) {
+    *out_sym = (string){0};
+    *out_off = 0;
+    Expr *px = ex;
+    while (px && px->kind == EX_CAST) px = px->lhs;
+    if (!px) return false;
+    if (px->kind == EX_STR) {
+        *out_sym = intern_string(e, px->name);
+        return true;
+    }
+    if (px->kind == EX_BIN && (px->op == OP_ADD || px->op == OP_SUB)) {
+        string base_sym = (string){0};
+        int64_t base_off = 0;
+        GConst idx_c;
+        if (gconst_ptr_addr(e, px->lhs, &base_sym, &base_off) &&
+            gconst_eval(e, px->rhs, &idx_c) && !idx_c.is_float) {
+            int64_t stride = 1;
+            if (e->program) {
+                for (size_t i = 0; i < e->program->globals.size; i++) {
+                    Global *gg = &e->program->globals.data[i];
+                    if (str_eq(gg->name, base_sym)) {
+                        if (gg->type.kind == TY_ARRAY_I32) stride = tinyc_int_size(&gg->type);
+                        else if (gg->type.kind == TY_ARRAY_F32) stride = 4;
+                        else if (gg->type.kind == TY_ARRAY_PTR_CHAR || gg->type.kind == TY_ARRAY_PTR_STRUCT)
+                            stride = e->program->target_wasm32 ? 4 : 8;
+                        else if (gg->type.kind == TY_ARRAY_STRUCT) {
+                            Type st = {0}; st.kind = TY_STRUCT; st.struct_name = gg->type.struct_name;
+                            stride = type_size(e, st);
+                        }
+                        break;
+                    }
+                }
+            }
+            int64_t delta = idx_c.i.v * stride;
+            *out_sym = base_sym;
+            *out_off = (px->op == OP_ADD) ? (base_off + delta) : (base_off - delta);
+            return true;
+        }
+        return false;
+    }
+    if (px->kind == EX_ADDR && px->lhs) {
+        Expr *inner = px->lhs;
+        if (inner->kind == EX_VAR && e->program) {
+            for (size_t i = 0; i < e->program->globals.size; i++) {
+                if (str_eq(e->program->globals.data[i].name, inner->name)) {
+                    *out_sym = e->program->globals.data[i].name;
+                    return true;
+                }
+            }
+            if (find_sig(e, inner->name)) {
+                *out_sym = inner->name;
+                return true;
+            }
+        }
+        if (inner->kind == EX_INDEX && inner->lhs && inner->lhs->kind == EX_VAR && e->program) {
+            GConst idx_c;
+            if (gconst_eval(e, inner->rhs, &idx_c) && !idx_c.is_float) {
+                for (size_t i = 0; i < e->program->globals.size; i++) {
+                    Global *gg = &e->program->globals.data[i];
+                    if (str_eq(gg->name, inner->lhs->name)) {
+                        int64_t stride = 1;
+                        if (gg->type.kind == TY_ARRAY_I32) stride = tinyc_int_size(&gg->type);
+                        else if (gg->type.kind == TY_ARRAY_F32) stride = 4;
+                        else if (gg->type.kind == TY_ARRAY_PTR_CHAR || gg->type.kind == TY_ARRAY_PTR_STRUCT)
+                            stride = e->program->target_wasm32 ? 4 : 8;
+                        else if (gg->type.kind == TY_ARRAY_STRUCT) {
+                            Type st = {0}; st.kind = TY_STRUCT; st.struct_name = gg->type.struct_name;
+                            stride = type_size(e, st);
+                        }
+                        *out_sym = gg->name;
+                        *out_off = idx_c.i.v * stride;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    if (px->kind == EX_VAR && e->program) {
+        for (size_t i = 0; i < e->program->globals.size; i++) {
+            Global *gg = &e->program->globals.data[i];
+            if (str_eq(gg->name, px->name) &&
+                (gg->type.kind == TY_ARRAY_I32 || gg->type.kind == TY_ARRAY_F32 ||
+                 gg->type.kind == TY_ARRAY_STRUCT || gg->type.kind == TY_ARRAY_PTR_CHAR ||
+                 gg->type.kind == TY_ARRAY_PTR_STRUCT)) {
+                *out_sym = gg->name;
+                return true;
+            }
+        }
+        if (find_sig(e, px->name)) {
+            *out_sym = px->name;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Set the scalar of C type `t`, stored as `ty`, at the current path.
 static void ginit_scalar(GInit *gi, Type t, MLIR_TypeHandle ty, Expr *ex) {
     E *e = gi->e;
     GConst c;
     bool ok = gconst_eval(e, ex, &c);
     if (ty == e->ptr) {
-        Expr *px = ex;
-        while (px && px->kind == EX_CAST) px = px->lhs;
-        if (px && px->kind == EX_STR) {
-            string ssym = intern_string(e, px->name);
-            ginit_set_sym(gi, ty, ssym);
+        string psym = (string){0};
+        int64_t poff = 0;
+        if (gconst_ptr_addr(e, ex, &psym, &poff) && poff == 0) {
+            ginit_set_sym(gi, ty, psym);
             return;
         }
-        if (px && px->kind == EX_ADDR && px->lhs && px->lhs->kind == EX_VAR && e->program) {
-            for (size_t gi_i = 0; gi_i < e->program->globals.size; gi_i++) {
-                if (str_eq(e->program->globals.data[gi_i].name, px->lhs->name)) {
-                    ginit_set_sym(gi, ty, e->program->globals.data[gi_i].name);
-                    return;
-                }
-            }
-        }
-        if (px && px->kind == EX_VAR && e->program) {
-            for (size_t gi_i = 0; gi_i < e->program->globals.size; gi_i++) {
-                Global *gg = &e->program->globals.data[gi_i];
-                if (str_eq(gg->name, px->name) &&
-                    (gg->type.kind == TY_ARRAY_I32 || gg->type.kind == TY_ARRAY_F32 ||
-                     gg->type.kind == TY_ARRAY_STRUCT || gg->type.kind == TY_ARRAY_PTR_CHAR ||
-                     gg->type.kind == TY_ARRAY_PTR_STRUCT)) {
-                    ginit_set_sym(gi, ty, gg->name);
-                    return;
-                }
-            }
-        }
-        if (!ok || c.is_float || c.i.v != 0)
+        if (!ok || c.is_float || (c.i.v != 0 && ex->kind != EX_CAST)) {
             EMIT_ERR(e, "only a null pointer can initialize a pointer in a global aggregate");
-        // After a designator, a null pointer may replace an earlier value.
-        else if (gi->overriding)
+        } else if (c.i.v != 0) {
+            ginit_set(gi, ty, MLIR_CreateAttributeInteger(e->ctx, c.i.v, e->i64));
+        } else if (gi->overriding) {
+            // After a designator, a null pointer may replace an earlier value.
             ginit_set(gi, ty, MLIR_INVALID_HANDLE);
+        }
         return;
     }
     if (!ok) {
@@ -8199,6 +8433,58 @@ static void ginit_members(GInit *gi, Type t, Expr *list, size_t *pos, bool brace
     gi->overriding = overriding;
 }
 
+static void ginit_serialize_bytes(E *e, Type ft, Expr *ex, uint8_t *buf, size_t buf_sz, size_t off) {
+    if (!ex || off >= buf_sz) return;
+    if (ft.kind == TY_STRUCT) {
+        StructDef *sd = find_struct(e, ft.struct_name);
+        if (!sd) return;
+        if (sd->is_union) {
+            if (sd->fields.size == 0) return;
+            size_t fi = 0;
+            Expr *val = ex;
+            if (ex->kind == EX_COMPOUND && ex->extra->args.size > 0) {
+                if (ex->extra->compound_field_names && ex->extra->compound_field_names[0].size > 0) {
+                    int idx = struct_field_index(sd, ex->extra->compound_field_names[0]);
+                    if (idx >= 0) fi = (size_t)idx;
+                }
+                val = ex->extra->args.data[0];
+            }
+            ginit_serialize_bytes(e, sd->fields.data[fi].type, val, buf, buf_sz, off);
+            return;
+        }
+        if (ex->kind != EX_COMPOUND) return;
+        struct_compute_layout(sd);
+        size_t n = ex->extra->args.size;
+        size_t cur_fi = 0;
+        for (size_t i = 0; i < n && cur_fi < sd->fields.size; i++) {
+            if (ex->extra->compound_field_names && ex->extra->compound_field_names[i].size > 0) {
+                int idx = struct_field_index(sd, ex->extra->compound_field_names[i]);
+                if (idx >= 0) cur_fi = (size_t)idx;
+            }
+            StructField *sf = &sd->fields.data[cur_fi];
+            int64_t foff = struct_field_offset(e, sd, sf->name);
+            ginit_serialize_bytes(e, sf->type, ex->extra->args.data[i], buf, buf_sz, off + (size_t)foff);
+            cur_fi++;
+        }
+        return;
+    }
+    GConst c;
+    if (!gconst_eval(e, ex, &c)) return;
+    size_t esz = (size_t)type_size(e, ft);
+    if (esz == 0 || off + esz > buf_sz) return;
+    uint64_t bits = 0;
+    if (ft.kind == TY_F32) {
+        float fv = (float)gconst_to_float(c, true);
+        uint32_t b32 = 0; memcpy(&b32, &fv, 4); bits = b32;
+    } else if (ft.kind == TY_F64) {
+        double dv = gconst_to_float(c, false);
+        memcpy(&bits, &dv, 8);
+    } else {
+        bits = (uint64_t)gconst_to_int(c, ft);
+    }
+    for (size_t b = 0; b < esz; b++) buf[off + b] = (uint8_t)(bits >> (8 * b));
+}
+
 static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool braced) {
     E *e = gi->e;
     GMembers m;
@@ -8209,12 +8495,34 @@ static void ginit_members_in(GInit *gi, Type t, Expr *list, size_t *pos, bool br
         if (!m.sd) { EMIT_ERR(e, "unknown struct {} in global initializer", t.struct_name); return; }
         m.count = (int64_t)m.sd->fields.size;
         if (m.sd->is_union) {
-            // Only zero is supported: consume one initializer (or the
-            // whole braced list).
+            MLIR_TypeHandle uelem; int64_t ues = 0, uc = 0;
+            union_blob_layout(e, m.sd, &uelem, &ues, &uc);
+            size_t bsz = (size_t)(ues * uc);
+            uint8_t *ubuf = arena_new_array(e->arena, uint8_t, bsz ? bsz : 1);
+            for (size_t bi = 0; bi < bsz; bi++) ubuf[bi] = 0;
             size_t end = braced ? list->extra->args.size : *pos + 1;
-            for (; *pos < end && *pos < list->extra->args.size; (*pos)++) {
-                if (!gconst_is_zero(e, list->extra->args.data[*pos]))
-                    EMIT_ERR(e, "initializing a union in a global is not supported");
+            if (*pos < end && *pos < list->extra->args.size && m.sd->fields.size > 0) {
+                size_t fi = 0;
+                if (list->extra->compound_field_names &&
+                    list->extra->compound_field_names[*pos].size > 0) {
+                    int idx = struct_field_index(m.sd, list->extra->compound_field_names[*pos]);
+                    if (idx >= 0) fi = (size_t)idx;
+                }
+                ginit_serialize_bytes(e, m.sd->fields.data[fi].type,
+                                      list->extra->args.data[*pos], ubuf, bsz, 0);
+            }
+            *pos = (end < list->extra->args.size) ? end : list->extra->args.size;
+            for (int64_t j = 0; j < uc; j++) {
+                uint64_t w = 0;
+                for (int64_t b = 0; b < ues; b++)
+                    w |= ((uint64_t)ubuf[j * ues + b]) << (8 * b);
+                if (w != 0 && ginit_push(gi, 0)) {
+                    if (ginit_push(gi, j)) {
+                        ginit_set(gi, uelem, MLIR_CreateAttributeInteger(e->ctx, (int64_t)w, uelem));
+                        gi->depth--;
+                    }
+                    gi->depth--;
+                }
             }
             return;
         }
@@ -8425,7 +8733,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
         // A struct (array) initializer; an unsized `T a[] = {...}` gets its
         // length here.
         GInit *gi = NULL;
-        if (g->init_expr) {
+        if (g->init_expr && ginit_is_aggregate(g->type)) {
             gi = arena_new(arena, GInit);
             ginit_collect(&e, g, gi);
         }
@@ -8478,20 +8786,25 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                    g->type.kind == TY_PTR_STRUCT || g->type.kind == TY_PTR_VOID ||
                    g->type.kind == TY_FNPTR || g->type.kind == TY_PTR_PTR) {
             string str_sym = (string){0};
+            int64_t ptr_off = 0;
             if (g->has_init && g->init_str.size > 0) {
                 str_sym = intern_string(&e, g->init_str);
+            } else if (g->has_init && g->init_expr) {
+                if (!gconst_ptr_addr(&e, g->init_expr, &str_sym, &ptr_off)) {
+                    EMIT_ERR(&e, "only a null pointer, string, or global address can initialize a global pointer");
+                }
             } else if (g->has_init && (g->init_int != 0 || g->init_float != 0.0)) {
                 // `T *g = 5;` / `(T *)5`: not supported (it used to become
                 // the null pointer, #365).
                 EMIT_ERR(&e, "only a null pointer or a string can initialize a global pointer");
             }
             // Emit the !llvm.ptr global with an initializer region that
-            // either returns the string addr or a null pointer.
+            // either returns the string/global addr (with optional byte GEP) or null.
             MLIR_BlockHandle init_blk = MLIR_INVALID_HANDLE;
             MLIR_OpHandle gop = MLIR_CreateLLVMGlobal(ctx, g->name, e.ptr,
                 /*is_constant=*/g->is_const,
                 /*init_kind=*/2, 0, 0.0, &init_blk, e.loc);
-            // Build initializer body: %0 = addressof @str ; llvm.return %0
+            // Build initializer body: %0 = addressof @sym ; [gep] ; llvm.return %0
             MLIR_BlockHandle save_blk = e.cur_block;
             bool save_term = e.terminated;
             e.cur_block = init_blk;
@@ -8499,6 +8812,10 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
             MLIR_ValueHandle init_v;
             if (str_sym.size > 0) {
                 init_v = emit_addressof(&e, str_sym, e.ptr);
+                if (ptr_off != 0) {
+                    int32_t gpath[1] = { (int32_t)ptr_off };
+                    init_v = emit_gep(&e, init_v, e.i8, gpath, 1, NULL, 0);
+                }
             } else {
                 init_v = emit_null_ptr(&e);
             }
@@ -8528,6 +8845,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 emit_global_aggregate(&e, g, find_struct_type(&e, sd), gi));
         } else if (g->type.kind == TY_ARRAY_STRUCT ||
                    g->type.kind == TY_ARRAY_I32 ||
+                   g->type.kind == TY_ARRAY_F32 ||
                    g->type.kind == TY_ARRAY_PTR_CHAR ||
                    g->type.kind == TY_ARRAY_PTR_STRUCT) {
             // Aggregate global (its deferred array length is resolved
@@ -8542,6 +8860,9 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
                 elem = e.ptr;
             } else {
                 elem = array_elem_type(&e, &g->type);
+            }
+            if (g->type.array_len2 != 0) {
+                elem = MLIR_CreateTypeLLVMArray(ctx, elem, (uint64_t)g->type.array_len2);
             }
             MLIR_TypeHandle arr_ty = MLIR_CreateTypeLLVMArray(
                 ctx, elem, (uint64_t)g->type.array_len);

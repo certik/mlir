@@ -194,11 +194,13 @@ char *setlocale(int category, const char *locale) { (void)category; (void)locale
 time_t time(time_t *t) { if (t) *t = 0; return 0; }
 clock_t clock(void) { return 0; }
 sighandler_t signal(int sig, sighandler_t handler) { (void)sig; (void)handler; return SIG_DFL; }
+#if !defined(longjmp)
 void longjmp(jmp_buf env, int val) {
     (void)env; (void)val;
     fputs("fatal: longjmp is not supported (error raised)\n", stderr);
     exit(70);
 }
+#endif
 
 /* ---- math ---- */
 static unsigned long long lx_bits(double x) { unsigned long long u; memcpy(&u, &x, 8); return u; }
