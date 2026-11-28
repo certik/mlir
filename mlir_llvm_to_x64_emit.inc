@@ -1360,6 +1360,19 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     return;
                 }
             }
+            if (g_x64_opt_level >= 2 && !F->wasm_lifted && no == 1 &&
+                (str_eqz(callee, "strlen") || str_eqz(callee, "base_strlen"))) {
+                emit_parallel_arg_moves(F, op, 0, 1);        // RDI=s
+                mov_ri(F, RCX, -1, 1);
+                mov_ri(F, RAX, 0, 0);
+                x64_emit0(F, OP_TYPE_X64_REPNE_SCASB);
+                // len = (~rcx) - 1 = (-rcx) - 2  ->  mov rax, -2; sub rax, rcx
+                mov_ri(F, RAX, -2, 1);
+                alu_rr(F, 0x29 /*sub*/, RAX, RCX, 1);
+                if (MLIR_GetOpNumResults(ctx, op) == 1)
+                    store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
+                return;
+            }
         }
         size_t arg_base = is_indirect ? 1 : 0;
         if (is_indirect)
@@ -2828,6 +2841,10 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         }
         case OP_TYPE_X64_REP_MOVSB: {
             eb(F, 0xF3); eb(F, 0xA4);
+            break;
+        }
+        case OP_TYPE_X64_REPNE_SCASB: {
+            eb(F, 0xF2); eb(F, 0xAE);
             break;
         }
         case OP_TYPE_X64_SUB_RSP: {

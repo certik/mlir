@@ -1340,6 +1340,70 @@ static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         }
     }
     free(hk); free(hv); free(vis); free(q);
+
+    // Merge single-predecessor unconditional branch chains (`B -> br(args) -> C`
+    // where `pred_cnt[C] == 1 && C != entry && C != B`).
+    for (int miter = 0; miter < 4; miter++) {
+        nb = MLIR_GetRegionNumBlocks(ctx, reg);
+        if (nb < 2) break;
+        size_t mcap = 16;
+        while (mcap < nb * 2) mcap *= 2;
+        uintptr_t *mhk = (uintptr_t *)calloc(mcap, sizeof(uintptr_t));
+        size_t    *mhv = (size_t    *)malloc(mcap * sizeof(size_t));
+        uint32_t  *mpc = (uint32_t  *)calloc(nb, sizeof(uint32_t));
+        if (!mhk || !mhv || !mpc) { free(mhk); free(mhv); free(mpc); break; }
+        size_t mmask = mcap - 1;
+        for (size_t b = 0; b < nb; b++) {
+            uintptr_t k = (uintptr_t)MLIR_GetRegionBlock(ctx, reg, b);
+            size_t s = (k * 1099511628211ull) & mmask;
+            while (mhk[s]) s = (s + 1) & mmask;
+            mhk[s] = k; mhv[s] = b;
+        }
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            if (no == 0) continue;
+            MLIR_OpHandle t = MLIR_GetBlockOp(ctx, bk, no - 1);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+            for (size_t si = 0; si < ns; si++) {
+                uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, t, si);
+                size_t s = (sk * 1099511628211ull) & mmask;
+                while (mhk[s]) { if (mhk[s] == sk) { mpc[mhv[s]]++; break; } s = (s + 1) & mmask; }
+            }
+        }
+        bool merged = false;
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            if (no == 0) continue;
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            if (MLIR_GetOpType(ctx, term) != OP_TYPE_LLVM_BR) continue;
+            MLIR_BlockHandle dst = MLIR_GetOpSuccessor(ctx, term, 0);
+            if (dst == entry || dst == bk) continue;
+            uintptr_t dk = (uintptr_t)dst;
+            size_t s = (dk * 1099511628211ull) & mmask;
+            size_t di = nb;
+            while (mhk[s]) { if (mhk[s] == dk) { di = mhv[s]; break; } s = (s + 1) & mmask; }
+            if (di >= nb || mpc[di] != 1) continue;
+            size_t dna = MLIR_GetBlockNumArgs(ctx, dst);
+            size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, 0);
+            if (dna != nso) continue;
+            for (size_t a = 0; a < dna; a++) {
+                MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetBlockArg(ctx, dst, a),
+                                           MLIR_GetOpSuccessorOperand(ctx, term, 0, a));
+            }
+            MLIR_DetachOp(ctx, term);
+            while (MLIR_GetBlockNumOps(ctx, dst) > 0) {
+                MLIR_OpHandle mop = MLIR_GetBlockOp(ctx, dst, 0);
+                MLIR_MoveOpToBlockEnd(ctx, mop, bk);
+            }
+            MLIR_EraseBlock(ctx, dst);
+            merged = true;
+            break;
+        }
+        free(mhk); free(mhv); free(mpc);
+        if (!merged) break;
+    }
 }
 
 static bool ifcvt_is_cheap_pure(MLIR_Context *ctx, MLIR_OpHandle op) {
@@ -2139,9 +2203,16 @@ static void unroll_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             continue;
         init_c = cf_sext(init_c, iv_w);
 
-        // Verify iv_next = add(iv, step_const) with step_const > 0.
+        // Verify iv_next = add(iv, step_const) (or and(add(iv, step_const), mask) for narrow unsigned iv).
         MLIR_ValueHandle iv_next = MLIR_GetOpSuccessorOperand(ctx, lterm, 0, iv_arg);
         MLIR_OpHandle iv_add = MLIR_GetValueDefiningOp(ctx, iv_next);
+        if (iv_add != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, iv_add) == OP_TYPE_LLVM_AND) {
+            int64_t mask_c = 0;
+            if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, iv_add, 1), &mask_c, NULL) &&
+                lim_c >= 0 && lim_c < mask_c && (mask_c & (mask_c + 1)) == 0) {
+                iv_add = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, iv_add, 0));
+            }
+        }
         if (iv_add == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, iv_add) != OP_TYPE_LLVM_ADD) continue;
         int64_t step_c = 0;
         if (MLIR_GetOpOperand(ctx, iv_add, 0) != iv ||
