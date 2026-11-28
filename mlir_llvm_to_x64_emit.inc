@@ -2114,7 +2114,8 @@ static bool x64_op_regs(MLIR_Context *ctx, MLIR_OpHandle op,
         *reads = (uint16_t)((1u << (v & 15)) | (1u << ((v >> 4) & 15)));
         return true;
     }
-    case OP_TYPE_X64_LOAD_MEM_SIB: {
+    case OP_TYPE_X64_LOAD_MEM_SIB:
+    case OP_TYPE_X64_LEA_SIB: {
         uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
         *writes = (uint16_t)(1u << (v & 15));
         *reads  = (uint16_t)((1u << ((v >> 4) & 15)) | (1u << ((v >> 8) & 15)));
@@ -2241,6 +2242,16 @@ static bool x64_op_regs(MLIR_Context *ctx, MLIR_OpHandle op,
         *reads = (uint16_t)((1u << (v & 15)) | (1u << ((v >> 4) & 15)));
         return true;
     }
+    case OP_TYPE_X64_REP_STOSB:
+    case OP_TYPE_X64_REPNE_SCASB:
+        *reads = (uint16_t)((1u << RAX) | (1u << RCX) | (1u << RDI));
+        *writes = (uint16_t)((1u << RCX) | (1u << RDI));
+        return true;
+    case OP_TYPE_X64_REP_MOVSB:
+    case OP_TYPE_X64_REPE_CMPSB:
+        *reads = (uint16_t)((1u << RCX) | (1u << RSI) | (1u << RDI));
+        *writes = (uint16_t)((1u << RCX) | (1u << RSI) | (1u << RDI));
+        return true;
     default:
         return false;
     }
@@ -2446,7 +2457,7 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
     size_t n_ops = MLIR_GetBlockNumOps(ctx, blk);
     if (n_ops < 2) return;
 
-    for (int pass = 0; pass < 3; pass++) {
+    for (int pass = 0; pass < 6; pass++) {
         uint16_t *lbl_in = NULL;
         size_t n_lbl = 0;
         x64_compute_lbl_liveness(ctx, blk, n_ops, &lbl_in, &n_lbl);
@@ -3013,13 +3024,14 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
             //    (e.g. mov rax, r10 ; movsxd rcx, r12d ; load_mem_sib r14, [rax + rcx*4])
             if (t0 == OP_TYPE_X64_LOAD_MEM_SIB || t0 == OP_TYPE_X64_STORE_MEM_SIB ||
                 t0 == OP_TYPE_X64_STORE_MEM_SIB_IMM8 || t0 == OP_TYPE_X64_ALU_RM_SIB ||
+                t0 == OP_TYPE_X64_LEA_SIB ||
                 t0 == OP_TYPE_X64_LOAD_MEM_XMM_SIB || t0 == OP_TYPE_X64_STORE_MEM_XMM_SIB) {
                 uint64_t v0 = (uint64_t)MLIR_GetOpInlineI64(ctx, op0);
                 bool base_in_hi = (t0 == OP_TYPE_X64_LOAD_MEM_SIB || t0 == OP_TYPE_X64_LOAD_MEM_XMM_SIB ||
-                                   t0 == OP_TYPE_X64_ALU_RM_SIB);
+                                   t0 == OP_TYPE_X64_ALU_RM_SIB || t0 == OP_TYPE_X64_LEA_SIB);
                 bool is_xmm  = (t0 == OP_TYPE_X64_LOAD_MEM_XMM_SIB || t0 == OP_TYPE_X64_STORE_MEM_XMM_SIB);
                 uint8_t base = base_in_hi ? (uint8_t)((v0 >> 4) & 15) : (uint8_t)(v0 & 15);
-                bool clobbers_base = (t0 == OP_TYPE_X64_LOAD_MEM_SIB && (uint8_t)(v0 & 15) == base) ||
+                bool clobbers_base = ((t0 == OP_TYPE_X64_LOAD_MEM_SIB || t0 == OP_TYPE_X64_LEA_SIB) && (uint8_t)(v0 & 15) == base) ||
                                      (t0 == OP_TYPE_X64_ALU_RM_SIB && (uint8_t)(v0 & 15) == base &&
                                       (uint8_t)((v0 >> 20) & 0xff) != 0x39 && (uint8_t)((v0 >> 20) & 0xff) != 0x3B);
                 bool base_is_val = (t0 == OP_TYPE_X64_STORE_MEM_SIB && (uint8_t)((v0 >> 8) & 15) == base) ||
@@ -3107,6 +3119,16 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                     uint8_t d0 = (uint8_t)(v0 & 15);
                     int w0 = (int)((v0 >> 8) & 1);
                     if (d0 == s1 && w0 == w1 && x64_reg_dead_after(ctx, blk, j + 1, n_ops, d0)) {
+                        uint64_t nv0 = (v0 & ~(uint64_t)15u) | (uint64_t)d1;
+                        MLIR_RewriteVoidInlineI64(ctx, op0, t0, (int64_t)nv0);
+                        MLIR_RewriteVoidInlineI64(ctx, op1, OP_TYPE_X64_NOP, 0);
+                        changed = true;
+                        continue;
+                    }
+                } else if (t0 == OP_TYPE_X64_LEA_SIB && w1 == 1) {
+                    uint64_t v0 = (uint64_t)MLIR_GetOpInlineI64(ctx, op0);
+                    uint8_t d0 = (uint8_t)(v0 & 15);
+                    if (d0 == s1 && x64_reg_dead_after(ctx, blk, j + 1, n_ops, d0)) {
                         uint64_t nv0 = (v0 & ~(uint64_t)15u) | (uint64_t)d1;
                         MLIR_RewriteVoidInlineI64(ctx, op0, t0, (int64_t)nv0);
                         MLIR_RewriteVoidInlineI64(ctx, op1, OP_TYPE_X64_NOP, 0);
@@ -3296,6 +3318,32 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                         MLIR_RewriteVoidInlineI64(ctx, op1, OP_TYPE_X64_ALU_RM_SIB,
                             (int64_t)((uint64_t)reg_op | ((uint64_t)base << 4) | ((uint64_t)idx << 8) |
                             ((uint64_t)scale << 12) | ((uint64_t)w1 << 16) | ((uint64_t)mem_opc << 20) | disp_hi));
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            // 6b4. Fuse shl idx, k (k=1..3) ; add base, idx -> lea base, [base + idx*(1<<k)]
+            //      (only on pass >= 2 so LOAD_MEM_SIB/STORE_MEM_SIB always fuse first,
+            //       when idx is dead after add and flags are unused).
+            if (pass >= 2 && t0 == OP_TYPE_X64_SHIFT_IMM && t1 == OP_TYPE_X64_ALU_RR) {
+                uint64_t v0 = (uint64_t)MLIR_GetOpInlineI64(ctx, op0);
+                uint8_t idx = (uint8_t)(v0 & 15);
+                int ext = (int)((v0 >> 4) & 7), sw = (int)((v0 >> 8) & 1);
+                uint8_t sh = (uint8_t)((v0 >> 12) & 0xff);
+                uint64_t v1 = (uint64_t)MLIR_GetOpInlineI64(ctx, op1);
+                uint8_t rm = (uint8_t)(v1 & 15), rr = (uint8_t)((v1 >> 4) & 15);
+                int w1 = (int)((v1 >> 8) & 1);
+                uint8_t opc = (uint8_t)((v1 >> 12) & 0xff);
+                if (ext == 4 && sw == 1 && sh >= 1 && sh <= 3 &&
+                    opc == 0x01 && w1 == 1 && rr == idx && rm != idx && idx != RSP &&
+                    x64_reg_dead_after(ctx, blk, j + 1, n_ops, idx)) {
+                    size_t k = x64_next_live(ctx, blk, j + 1, n_ops);
+                    MLIR_OpType tk = (k < n_ops) ? MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, k)) : OP_TYPE_X64_NOP;
+                    if (tk != OP_TYPE_X64_JCC && tk != OP_TYPE_X64_SETCC8 && tk != OP_TYPE_X64_CMOVCC) {
+                        MLIR_RewriteVoidInlineI64(ctx, op0, OP_TYPE_X64_NOP, 0);
+                        MLIR_RewriteVoidInlineI64(ctx, op1, OP_TYPE_X64_LEA_SIB,
+                            (int64_t)((uint64_t)rm | ((uint64_t)rm << 4) | ((uint64_t)idx << 8) | ((uint64_t)sh << 12)));
                         changed = true;
                         continue;
                     }
@@ -3793,6 +3841,16 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             rex(F, is_32 ? 0 : 1, dst, 0, base);
             eb(F, 0x8D);
             modrm_mem_disp(F, dst, base, disp);
+            break;
+        }
+        case OP_TYPE_X64_LEA_SIB: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t dst = (uint8_t)(v & 15), base = (uint8_t)((v >> 4) & 15), idx = (uint8_t)((v >> 8) & 15);
+            int scale = (int)((v >> 12) & 3);
+            int32_t disp = (int32_t)(uint32_t)(v >> 32);
+            rex(F, 1, dst, idx, base);
+            eb(F, 0x8D);
+            modrm_mem_sib_disp(F, dst, base, idx, scale, disp);
             break;
         }
         case OP_TYPE_X64_LEA_RIP_DATA: {
