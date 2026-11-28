@@ -1729,7 +1729,16 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             for (uint32_t vi = 0; vi < nv; vi++) {
                 if (last_use[vi] <= first_pos[vi]) continue;
                 int8_t pk = home_pk[vi];
-                if (pk < 0) { sp_list[sp_n++] = vi; continue; }
+                if (pk < 0) {
+                    if (T->remat_alloca) {
+                        MLIR_OpHandle dop = MLIR_GetValueDefiningOp(ctx, handle[vi]);
+                        if (dop != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, dop) == OP_TYPE_LLVM_MLIR_ADDRESSOF &&
+                            (crosses[vi] || weight[vi] < 20ull))
+                            continue;
+                    }
+                    sp_list[sp_n++] = vi;
+                    continue;
+                }
                 uint64_t *rb = reg_blks + (size_t)pk * nb_w;
                 uint32_t db = def_blk[vi];
                 a64_bs_set(rb, db);
