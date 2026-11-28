@@ -6,6 +6,7 @@ wrapper that includes corec + corec-stdlib + the test sources, then compile
 that one wrapper with tinyC.
 """
 
+import concurrent.futures
 import os
 import platform
 import re
@@ -270,11 +271,18 @@ def link_native(obj_path: Path, exe_path: Path, host_sources: list[Path] | None 
     """Link the llc-produced single-TU object, optionally with host .c files."""
     extra = [str(p) for p in (host_sources or [])]
     if IS_WIN:
-        # MSVC: cl /nologo /MD obj /Fe:exe.exe
         # The llc-produced object carries no /DEFAULTLIB directive, so name the
         # /MD CRT umbrella lib (msvcrt.lib) explicitly — it provides the
-        # mainCRTStartup entry point. (Previously cl added it implicitly because
-        # we also handed it a .c source to compile.)
+        # mainCRTStartup entry point. When there are no extra host C sources to
+        # compile, invoke link.exe directly to avoid spawning cl.exe per test.
+        if not extra:
+            return run([
+                "link", "/nologo",
+                str(obj_path),
+                "msvcrt.lib", "ucrt.lib", "vcruntime.lib",
+                "kernel32.lib", "shell32.lib",
+                f"/OUT:{exe_path}",
+            ])
         return run([
             CC, "/nologo", "/MD",
             str(obj_path),
@@ -480,344 +488,408 @@ def main():
             failures += 1
         else:
             print("PASS driver_cli")
-    for t in tests:
-        name = t["name"]
-        # `expected_stdout` is optional (default ""): macho-only tests that
-        # don't exercise stdout don't need to set it. `expected_exit_code`
-        # is also optional (default 0): macho_exit-style tests set it.
-        expected         = t.get("expected_stdout", "")
-        expected_rc      = t.get("expected_exit_code", 0)
-        # Tests that differ between wasm32 (4-byte pointers, 4-byte long)
-        # and the host (8-byte pointers on x86_64/aarch64) can override
-        # the expected stdout with `expected_stdout_wasm`. The wasm and
-        # llvm_via_wasm macho backends consume the wasm32-sized pipeline,
-        # so they use the wasm32-flavored expected stdout. The native
-        # `llvm` macho backend
-        # is LP64 (native sizing), so it keeps the native `expected_stdout`.
-        if (TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t
-                and not (TARGET == "macho" and MACHO_BACKEND == "llvm")):
-            expected = t["expected_stdout_wasm"]
-        if name == "func_macro" and (not use_unity_source() or TARGET == "elf"):
-            expected = "greet\nsquare=16\nmain\n"
-        # `targets` lists the runner targets a test may run under. Default
-        # (omitted) is ["native", "wasm"] — the established backends.
-        # Mach-O-only tests opt in explicitly with `targets = ["macho"]`.
-        targets = t.get("targets", ["native", "wasm"])
-        if TARGET not in targets:
-            print(f"SKIP {name} (targets={targets}, current={TARGET})")
-            skipped += 1
-            continue
-        macho_backends = t.get("macho_backends")
-        if (TARGET == "macho" and macho_backends is not None
-                and MACHO_BACKEND not in macho_backends):
-            print(f"SKIP {name} (macho_backends={macho_backends}, current={MACHO_BACKEND})")
-            skipped += 1
-            continue
-        platforms = t.get("platforms")
-        if platforms is not None and plat_key not in platforms:
-            print(f"SKIP {name} (platforms={platforms}, current={plat_key})")
-            skipped += 1
-            continue
-        # Optional opt-out for the wasm target only (e.g. tests that
-        # rely on host-libc behavior wasm32-wasi can't reproduce).
-        # The macho backend consumes the same wasm pipeline output, so
-        # `wasm_skip` implies a macho skip too.
-        if TARGET in ("wasm", "macho") and t.get("wasm_skip"):
-            print(f"SKIP {name} (wasm_skip)")
-            skipped += 1
-            continue
-        # Inverse opt-out: tests that exercise wasm-only builtins
-        # (e.g. `__builtin_wasm_memory_size`) cannot be run on the
-        # native (LLVM-IR / llc) target — those intrinsics aren't
-        # valid for x86/aarch64 codegen.
-        if TARGET == "native" and t.get("native_skip"):
-            print(f"SKIP {name} (native_skip)")
-            skipped += 1
-            continue
-        # Optional opt-out for the native LLVM->WASM pipeline only
-        # (mlir_llvm_to_wasmssa.c + mlir_wasmssa_to_wasmstack.c +
-        # mlir_wasmstack_to_bin.c). Covers the few corners the in-tree
-        # pipeline doesn't implement yet; the upstream wasm path still
-        # runs the test.
-        if (TARGET == "wasm" and LOWERING == "native"
-                and not LIFT_USE_NATIVE
-                and t.get("wasm_native_skip")):
-            print(f"SKIP {name} (wasm_native_skip)")
-            skipped += 1
-            continue
-        # Inverse opt-out: tests that exercise wasm-specific custom
-        # function attributes (e.g.
-        # `__attribute__((__import_module__("...")))`) which are
-        # honored by the in-tree native LLVM->WASM pipeline but not
-        # by the upstream LLVM WebAssembly backend (which would need
-        # a separate `passthrough = ...` attribute plumbing to forward
-        # them through MLIR's `convert-func-to-llvm` pass).
-        if (TARGET == "wasm" and LOWERING != "native"
-                and t.get("wasm_upstream_skip")):
-            print(f"SKIP {name} (wasm_upstream_skip)")
-            skipped += 1
-            continue
-        # Inverse opt-out: tests that exercise wasm-only semantics (WASI
-        # imports, wasm32 long-sizing) which cannot run on the LP64
-        # `llvm` macho backend — there is no WASI host there.
-        if (TARGET == "macho" and MACHO_BACKEND == "llvm"
-                and t.get("macho_llvm_skip")):
-            print(f"SKIP {name} (macho_llvm_skip)")
-            skipped += 1
-            continue
-        # Inverse opt-in: tests that only make sense on the direct `llvm` macho
-        # backend (not the wasm / llvm_via_wasm macho backends, which compile
-        # through the wasm pipeline first). Currently unused, but kept as a
-        # general gate for native-aarch64-only behaviour.
-        if t.get("macho_llvm_only") and not (TARGET == "macho" and MACHO_BACKEND == "llvm"):
-            print(f"SKIP {name} (macho_llvm_only)")
-            skipped += 1
-            continue
-        if t.get("link_separately"):
-            print(f"SKIP {name} (link_separately; not a single-TU test)")
-            skipped += 1
-            continue
-        if t.get("single_tu_skip"):
-            print(f"SKIP {name} (single_tu_skip)")
-            skipped += 1
-            continue
-        # Multi-file tests pass `sources = [...]`; single-file tests
-        # default to `<name>.tc` for backwards compatibility.
-        sources = list(t.get("sources", [f"{name}.tc"]))
-        srcs = [HERE / "tests" / s for s in sources]
-        unity_src = write_unity_source(name, srcs) if use_unity_source() else None
+    current_umask = 0
+    if not IS_WIN:
+        current_umask = os.umask(0)
+        os.umask(current_umask)
 
-        # Compile-error regressions: the source must be rejected with a clean
-        # non-zero exit (not a crash) and a diagnostic containing the given
-        # text. Only the front end runs, so every target checks the same.
-        compile_error = t.get("expected_compile_error")
-        if compile_error is not None:
-            r = run([str(TINYC), "--emit=mlir", *unity_include_flags(), str(srcs[0])])
-            output = r.stdout + r.stderr
-            # tinyC reports errors with exit code 1; anything else (a signal,
-            # or a Windows exception code such as 0xC0000005) is a crash.
-            if r.returncode != 1:
-                print(f"FAIL {name}: expected a compile error, tinyc returned "
-                      f"{r.returncode}\noutput:\n{output}")
-                failures += 1
-            elif compile_error not in output:
-                print(f"FAIL {name}: diagnostic {compile_error!r} not found in:\n{output}")
-                failures += 1
-            else:
-                print(f"PASS {name}")
-            continue
-
-        # Compiler-probe regressions inspect a native pipeline stage directly.
-        # They validate generated WasmSSA or the WasmSSA -> LLVM -> AArch64
-        # conversion rather than executing a linked module.
-        native_wasm_emit = t.get("wasm_native_emit")
-        if native_wasm_emit is not None:
-            if TARGET != "wasm" or LOWERING != "native":
-                print(f"SKIP {name} (wasm_native_emit)")
+    def _run_one(t):
+        failures = 0
+        skipped = 0
+        out = []
+        print = out.append
+        for t in (t,):
+            name = t["name"]
+            # `expected_stdout` is optional (default ""): macho-only tests that
+            # don't exercise stdout don't need to set it. `expected_exit_code`
+            # is also optional (default 0): macho_exit-style tests set it.
+            expected         = t.get("expected_stdout", "")
+            expected_rc      = t.get("expected_exit_code", 0)
+            # Tests that differ between wasm32 (4-byte pointers, 4-byte long)
+            # and the host (8-byte pointers on x86_64/aarch64) can override
+            # the expected stdout with `expected_stdout_wasm`. The wasm and
+            # llvm_via_wasm macho backends consume the wasm32-sized pipeline,
+            # so they use the wasm32-flavored expected stdout. The native
+            # `llvm` macho backend
+            # is LP64 (native sizing), so it keeps the native `expected_stdout`.
+            if (TARGET in ("wasm", "macho") and "expected_stdout_wasm" in t
+                    and not (TARGET == "macho" and MACHO_BACKEND == "llvm")):
+                expected = t["expected_stdout_wasm"]
+            if name == "func_macro" and (not use_unity_source() or TARGET == "elf"):
+                expected = "greet\nsquare=16\nmain\n"
+            # `targets` lists the runner targets a test may run under. Default
+            # (omitted) is ["native", "wasm"] — the established backends.
+            # Mach-O-only tests opt in explicitly with `targets = ["macho"]`.
+            targets = t.get("targets", ["native", "wasm"])
+            if TARGET not in targets:
+                print(f"SKIP {name} (targets={targets}, current={TARGET})")
                 skipped += 1
                 continue
-            probe_src = srcs[0] if t.get("wasm_native_direct_source") else unity_src
-            probe_out = HERE / "tests" / f"{name}.{native_wasm_emit}.probe"
-            r = run([str(TINYC), f"--emit={native_wasm_emit}", *LOWERING_FLAG,
-                     *unity_include_flags(), "-o", str(probe_out), str(probe_src)])
-            if r.returncode != 0:
-                print(f"FAIL {name}: tinyc --emit={native_wasm_emit} returned "
-                      f"{r.returncode}\nstderr:\n{r.stderr}")
-                failures += 1
+            macho_backends = t.get("macho_backends")
+            if (TARGET == "macho" and macho_backends is not None
+                    and MACHO_BACKEND not in macho_backends):
+                print(f"SKIP {name} (macho_backends={macho_backends}, current={MACHO_BACKEND})")
+                skipped += 1
                 continue
-            # Textual stages (wasmssa, lowered) can be checked for needles /
-            # patterns; a binary stage (aarch64) only has to compile.
-            if native_wasm_emit in ("wasmssa", "lowered"):
-                label = {"wasmssa": "WasmSSA", "lowered": "lowered MLIR"}[native_wasm_emit]
-                ir = probe_out.read_bytes().decode("latin1")
-                probe_failed = False
-                for needle in t.get("wasm_native_emit_contains", []):
-                    if needle not in ir:
-                        print(f"FAIL {name}: {label} is missing {needle!r}")
-                        failures += 1
-                        probe_failed = True
-                        break
-                if not probe_failed:
-                    for pattern in t.get("wasm_native_emit_regex", []):
-                        if re.search(pattern, ir) is None:
-                            print(f"FAIL {name}: {label} does not match {pattern!r}")
-                            failures += 1
-                            probe_failed = True
-                            break
-                if not probe_failed:
-                    for needle in t.get("wasm_native_emit_not_contains", []):
-                        if needle in ir:
-                            print(f"FAIL {name}: {label} unexpectedly contains {needle!r}")
-                            failures += 1
-                            probe_failed = True
-                            break
-                if probe_failed:
+            platforms = t.get("platforms")
+            if platforms is not None and plat_key not in platforms:
+                print(f"SKIP {name} (platforms={platforms}, current={plat_key})")
+                skipped += 1
+                continue
+            # Optional opt-out for the wasm target only (e.g. tests that
+            # rely on host-libc behavior wasm32-wasi can't reproduce).
+            # The macho backend consumes the same wasm pipeline output, so
+            # `wasm_skip` implies a macho skip too.
+            if TARGET in ("wasm", "macho") and t.get("wasm_skip"):
+                print(f"SKIP {name} (wasm_skip)")
+                skipped += 1
+                continue
+            # Inverse opt-out: tests that exercise wasm-only builtins
+            # (e.g. `__builtin_wasm_memory_size`) cannot be run on the
+            # native (LLVM-IR / llc) target — those intrinsics aren't
+            # valid for x86/aarch64 codegen.
+            if TARGET == "native" and t.get("native_skip"):
+                print(f"SKIP {name} (native_skip)")
+                skipped += 1
+                continue
+            # Optional opt-out for the native LLVM->WASM pipeline only
+            # (mlir_llvm_to_wasmssa.c + mlir_wasmssa_to_wasmstack.c +
+            # mlir_wasmstack_to_bin.c). Covers the few corners the in-tree
+            # pipeline doesn't implement yet; the upstream wasm path still
+            # runs the test.
+            if (TARGET == "wasm" and LOWERING == "native"
+                    and not LIFT_USE_NATIVE
+                    and t.get("wasm_native_skip")):
+                print(f"SKIP {name} (wasm_native_skip)")
+                skipped += 1
+                continue
+            # Inverse opt-out: tests that exercise wasm-specific custom
+            # function attributes (e.g.
+            # `__attribute__((__import_module__("...")))`) which are
+            # honored by the in-tree native LLVM->WASM pipeline but not
+            # by the upstream LLVM WebAssembly backend (which would need
+            # a separate `passthrough = ...` attribute plumbing to forward
+            # them through MLIR's `convert-func-to-llvm` pass).
+            if (TARGET == "wasm" and LOWERING != "native"
+                    and t.get("wasm_upstream_skip")):
+                print(f"SKIP {name} (wasm_upstream_skip)")
+                skipped += 1
+                continue
+            # Inverse opt-out: tests that exercise wasm-only semantics (WASI
+            # imports, wasm32 long-sizing) which cannot run on the LP64
+            # `llvm` macho backend — there is no WASI host there.
+            if (TARGET == "macho" and MACHO_BACKEND == "llvm"
+                    and t.get("macho_llvm_skip")):
+                print(f"SKIP {name} (macho_llvm_skip)")
+                skipped += 1
+                continue
+            # Inverse opt-in: tests that only make sense on the direct `llvm` macho
+            # backend (not the wasm / llvm_via_wasm macho backends, which compile
+            # through the wasm pipeline first). Currently unused, but kept as a
+            # general gate for native-aarch64-only behaviour.
+            if t.get("macho_llvm_only") and not (TARGET == "macho" and MACHO_BACKEND == "llvm"):
+                print(f"SKIP {name} (macho_llvm_only)")
+                skipped += 1
+                continue
+            if t.get("link_separately"):
+                print(f"SKIP {name} (link_separately; not a single-TU test)")
+                skipped += 1
+                continue
+            if t.get("single_tu_skip"):
+                print(f"SKIP {name} (single_tu_skip)")
+                skipped += 1
+                continue
+            # Multi-file tests pass `sources = [...]`; single-file tests
+            # default to `<name>.tc` for backwards compatibility.
+            sources = list(t.get("sources", [f"{name}.tc"]))
+            srcs = [HERE / "tests" / s for s in sources]
+            unity_src = write_unity_source(name, srcs) if use_unity_source() else None
+
+            # Compile-error regressions: the source must be rejected with a clean
+            # non-zero exit (not a crash) and a diagnostic containing the given
+            # text. Only the front end runs, so every target checks the same.
+            compile_error = t.get("expected_compile_error")
+            if compile_error is not None:
+                r = run([str(TINYC), "--emit=mlir", *unity_include_flags(), str(srcs[0])])
+                output = r.stdout + r.stderr
+                # tinyC reports errors with exit code 1; anything else (a signal,
+                # or a Windows exception code such as 0xC0000005) is a crash.
+                if r.returncode != 1:
+                    print(f"FAIL {name}: expected a compile error, tinyc returned "
+                          f"{r.returncode}\noutput:\n{output}")
+                    failures += 1
+                elif compile_error not in output:
+                    print(f"FAIL {name}: diagnostic {compile_error!r} not found in:\n{output}")
+                    failures += 1
+                else:
+                    print(f"PASS {name}")
+                continue
+
+            # Compiler-probe regressions inspect a native pipeline stage directly.
+            # They validate generated WasmSSA or the WasmSSA -> LLVM -> AArch64
+            # conversion rather than executing a linked module.
+            native_wasm_emit = t.get("wasm_native_emit")
+            if native_wasm_emit is not None:
+                if TARGET != "wasm" or LOWERING != "native":
+                    print(f"SKIP {name} (wasm_native_emit)")
+                    skipped += 1
                     continue
-            print(f"PASS {name}")
-            continue
-
-        # Lift-probe regressions: compile + link the test to a wasm module,
-        # lift it back with `--from-wasm --emit=aarch64` (the only path that
-        # runs load-CSE / arith-GVN / DCE, on the lifted `llvm` dialect) and
-        # bound how often an op may occur in one function of the result. The
-        # lifter creates part of its ops by name only, so this catches a pass
-        # that stops recognising those. A linked module has no function
-        # names, so the function is the one whose body matches the marker
-        # regex (e.g. a constant that occurs nowhere else in the program).
-        lift_marker = t.get("wasm_native_lift_marker")
-        if lift_marker is not None:
-            # The lifted path only works with the native MLIR API.
-            if TARGET != "wasm" or LOWERING != "native" or api != "native":
-                print(f"SKIP {name} (wasm_native_lift_marker; MLIR API: {api})")
-                skipped += 1
-                continue
-            lift_obj = HERE / "tests" / f"{name}.lift.o"
-            lift_wasm = HERE / "tests" / f"{name}.lift.wasm"
-            r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
-                     *unity_include_flags(), "-o", str(lift_obj), str(unity_src)])
-            if r.returncode == 0:
-                r = run([str(NATIVE_LINK), "--link", "-o", str(lift_wasm),
-                         "--export=_start", str(lift_obj)])
-            if r.returncode == 0:
-                r = run([str(TINYC), "--from-wasm", str(lift_wasm), "--emit=aarch64"])
-            if r.returncode != 0:
-                print(f"FAIL {name}: lifting to aarch64 returned {r.returncode}\n"
-                      f"stderr:\n{r.stderr}")
-                failures += 1
-                continue
-            # Regexes, so the probe does not depend on the printer's spacing.
-            # Each wasm_native_lift_{min,max} key is a regex that must match a
-            # whole op name (so `aarch64\.ldr_w` alone does not count
-            # aarch64.ldr_w_reg; write `aarch64\.ldr_w(_reg)?` for both).
-            funcs = [f for f in re.split(r'^\s*"?aarch64\.func"?\(', r.stdout,
-                                         flags=re.M)[1:]
-                     if re.search(lift_marker, f)]
-            if len(funcs) != 1:
-                print(f"FAIL {name}: {len(funcs)} lifted functions contain "
-                      f"{lift_marker!r} (expected exactly 1)")
-                failures += 1
-                continue
-            bad = None
-            for kind in ("max", "min"):
-                for op_re, n in t.get(f"wasm_native_lift_{kind}", {}).items():
-                    got = len(re.findall(rf"(?<![\w.])(?:{op_re})(?![\w.])",
-                                         funcs[0]))
-                    if (got > n) if kind == "max" else (got < n):
-                        bad = bad or (f"{got} x {op_re!r} (expected at "
-                                      f"{'most' if kind == 'max' else 'least'} {n})")
-            if bad:
-                print(f"FAIL {name}: the probed function has {bad}")
-                failures += 1
-                continue
-            print(f"PASS {name}")
-            continue
-
-        if TARGET == "wasm":
-            obj  = HERE / "tests" / f"{name}.wasm.o"
-            wasm = HERE / "tests" / f"{name}.wasm"
-
-            # Stage 1: tinyc emits one wasm32 object from the generated
-            # single-TU root.
-            r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
-                     *unity_include_flags(),
-                     "-o", str(obj),
-                     str(unity_src)])
-            if r.returncode != 0:
-                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
-                failures += 1
-                continue
-
-            # Stage 2: link the tinyc-emitted object into a runnable module.
-            # va_arg is lowered inline and `_start` comes from tinyC-compiled
-            # platform_wasm.c, so no external support objects are linked.
-            r = link_wasm([obj], wasm)
-            if r.returncode != 0:
-                print(f"FAIL {name}: wasm-ld failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
-                failures += 1
-                continue
-
-            # Stage 3: run under wasmtime.
-            r = run([WASMTIME, str(wasm)])
-            if r.returncode != expected_rc:
-                print(f"FAIL {name}: wasm exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
-                failures += 1
-                continue
-            if r.stdout != expected:
-                print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
-                failures += 1
-                continue
-
-            print(f"PASS {name}")
-            continue
-
-        if TARGET == "elf":
-            # Native x86_64 -> static ELF executable (Linux). One invocation
-            # compiles + links + emits a directly-runnable binary; run it and
-            # compare stdout + exit code against the LP64 expectations.
-            exe = HERE / "tests" / f"{name}.elf"
-            tinyc_cmd = [str(TINYC), "--emit=elf", *LOWERING_FLAG,
-                         *HOST_VARARGS_FLAG,
-                         *unity_include_flags(),
-                         "-o", str(exe)]
-            tinyc_cmd.append(str(unity_src))
-            r = run(tinyc_cmd)
-            if r.returncode != 0:
-                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
-                failures += 1
-                continue
-            r = run([str(exe)])
-            if r.returncode != expected_rc:
-                print(f"FAIL {name}: elf exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
-                failures += 1
-                continue
-            if r.stdout != expected:
-                print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
-                failures += 1
-                continue
-            print(f"PASS {name}")
-            continue
-
-        if TARGET == "macho":
-            exe = HERE / "tests" / f"{name}.macho"
-
-            # The llvm_via_wasm sub-backend goes through the lifter:
-            #   per-source --emit=wasm + wasm-ld + --from-wasm <linked.wasm>
-            # so it always exercises the full wasm-linker pipeline before
-            # touching the llvm backend. This is the only way to get
-            # per-TU isolation that tinyc itself doesn't provide for the
-            # joint multi-source --emit=macho invocation.
-            if MACHO_BACKEND == "llvm_via_wasm":
-                via_backend = "llvm"
-                obj_j = HERE / "tests" / f"{name}.macho.wasm.o"
-                r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
-                         *unity_include_flags(),
-                         "-o", str(obj_j),
-                         str(unity_src)])
+                probe_src = srcs[0] if t.get("wasm_native_direct_source") else unity_src
+                probe_out = HERE / "tests" / f"{name}.{native_wasm_emit}.probe"
+                r = run([str(TINYC), f"--emit={native_wasm_emit}", *LOWERING_FLAG,
+                         *unity_include_flags(), "-o", str(probe_out), str(probe_src)])
                 if r.returncode != 0:
-                    print(f"FAIL {name}: tinyc --emit=wasm returned {r.returncode}\nstderr:\n{r.stderr}")
+                    print(f"FAIL {name}: tinyc --emit={native_wasm_emit} returned "
+                          f"{r.returncode}\nstderr:\n{r.stderr}")
                     failures += 1
                     continue
-                linked_wasm = HERE / "tests" / f"{name}.macho.linked.wasm"
-                r = link_wasm([obj_j], linked_wasm)
+                # Textual stages (wasmssa, lowered) can be checked for needles /
+                # patterns; a binary stage (aarch64) only has to compile.
+                if native_wasm_emit in ("wasmssa", "lowered"):
+                    label = {"wasmssa": "WasmSSA", "lowered": "lowered MLIR"}[native_wasm_emit]
+                    ir = probe_out.read_bytes().decode("latin1")
+                    probe_failed = False
+                    for needle in t.get("wasm_native_emit_contains", []):
+                        if needle not in ir:
+                            print(f"FAIL {name}: {label} is missing {needle!r}")
+                            failures += 1
+                            probe_failed = True
+                            break
+                    if not probe_failed:
+                        for pattern in t.get("wasm_native_emit_regex", []):
+                            if re.search(pattern, ir) is None:
+                                print(f"FAIL {name}: {label} does not match {pattern!r}")
+                                failures += 1
+                                probe_failed = True
+                                break
+                    if not probe_failed:
+                        for needle in t.get("wasm_native_emit_not_contains", []):
+                            if needle in ir:
+                                print(f"FAIL {name}: {label} unexpectedly contains {needle!r}")
+                                failures += 1
+                                probe_failed = True
+                                break
+                    if probe_failed:
+                        continue
+                print(f"PASS {name}")
+                continue
+
+            # Lift-probe regressions: compile + link the test to a wasm module,
+            # lift it back with `--from-wasm --emit=aarch64` (the only path that
+            # runs load-CSE / arith-GVN / DCE, on the lifted `llvm` dialect) and
+            # bound how often an op may occur in one function of the result. The
+            # lifter creates part of its ops by name only, so this catches a pass
+            # that stops recognising those. A linked module has no function
+            # names, so the function is the one whose body matches the marker
+            # regex (e.g. a constant that occurs nowhere else in the program).
+            lift_marker = t.get("wasm_native_lift_marker")
+            if lift_marker is not None:
+                # The lifted path only works with the native MLIR API.
+                if TARGET != "wasm" or LOWERING != "native" or api != "native":
+                    print(f"SKIP {name} (wasm_native_lift_marker; MLIR API: {api})")
+                    skipped += 1
+                    continue
+                lift_obj = HERE / "tests" / f"{name}.lift.o"
+                lift_wasm = HERE / "tests" / f"{name}.lift.wasm"
+                r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                         *unity_include_flags(), "-o", str(lift_obj), str(unity_src)])
+                if r.returncode == 0:
+                    r = run([str(NATIVE_LINK), "--link", "-o", str(lift_wasm),
+                             "--export=_start", str(lift_obj)])
+                if r.returncode == 0:
+                    r = run([str(TINYC), "--from-wasm", str(lift_wasm), "--emit=aarch64"])
+                if r.returncode != 0:
+                    print(f"FAIL {name}: lifting to aarch64 returned {r.returncode}\n"
+                          f"stderr:\n{r.stderr}")
+                    failures += 1
+                    continue
+                # Regexes, so the probe does not depend on the printer's spacing.
+                # Each wasm_native_lift_{min,max} key is a regex that must match a
+                # whole op name (so `aarch64\.ldr_w` alone does not count
+                # aarch64.ldr_w_reg; write `aarch64\.ldr_w(_reg)?` for both).
+                funcs = [f for f in re.split(r'^\s*"?aarch64\.func"?\(', r.stdout,
+                                             flags=re.M)[1:]
+                         if re.search(lift_marker, f)]
+                if len(funcs) != 1:
+                    print(f"FAIL {name}: {len(funcs)} lifted functions contain "
+                          f"{lift_marker!r} (expected exactly 1)")
+                    failures += 1
+                    continue
+                bad = None
+                for kind in ("max", "min"):
+                    for op_re, n in t.get(f"wasm_native_lift_{kind}", {}).items():
+                        got = len(re.findall(rf"(?<![\w.])(?:{op_re})(?![\w.])",
+                                             funcs[0]))
+                        if (got > n) if kind == "max" else (got < n):
+                            bad = bad or (f"{got} x {op_re!r} (expected at "
+                                          f"{'most' if kind == 'max' else 'least'} {n})")
+                if bad:
+                    print(f"FAIL {name}: the probed function has {bad}")
+                    failures += 1
+                    continue
+                print(f"PASS {name}")
+                continue
+
+            if TARGET == "wasm":
+                obj  = HERE / "tests" / f"{name}.wasm.o"
+                wasm = HERE / "tests" / f"{name}.wasm"
+
+                # Stage 1: tinyc emits one wasm32 object from the generated
+                # single-TU root.
+                r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                         *unity_include_flags(),
+                         "-o", str(obj),
+                         str(unity_src)])
+                if r.returncode != 0:
+                    print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                    failures += 1
+                    continue
+
+                # Stage 2: link the tinyc-emitted object into a runnable module.
+                # va_arg is lowered inline and `_start` comes from tinyC-compiled
+                # platform_wasm.c, so no external support objects are linked.
+                r = link_wasm([obj], wasm)
                 if r.returncode != 0:
                     print(f"FAIL {name}: wasm-ld failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
                     failures += 1
                     continue
-                r = run([str(TINYC), "--from-wasm", str(linked_wasm),
-                         "--emit=macho", f"--macho-backend={via_backend}",
-                         "--host-platform", str(HOST_PLATFORM),
-                         "--wasi-adapter", str(WASI_ADAPTER),
-                         "-I", str(COREC_DIR), "-I", str(ROOT),
-                         "-o", str(exe)])
-                if r.returncode != 0:
-                    print(f"FAIL {name}: tinyc --from-wasm returned {r.returncode}\nstderr:\n{r.stderr}")
+
+                # Stage 3: run under wasmtime.
+                r = run([WASMTIME, str(wasm)])
+                if r.returncode != expected_rc:
+                    print(f"FAIL {name}: wasm exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
                     failures += 1
                     continue
-                created_file = t.get("created_file")
-                created_path = ROOT / created_file if created_file else None
-                if created_path is not None:
-                    created_path.unlink(missing_ok=True)
-                # Same retry-on-SIGKILL dance as the regular macho path.
+                if r.stdout != expected:
+                    print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                    failures += 1
+                    continue
+
+                print(f"PASS {name}")
+                continue
+
+            if TARGET == "elf":
+                # Native x86_64 -> static ELF executable (Linux). One invocation
+                # compiles + links + emits a directly-runnable binary; run it and
+                # compare stdout + exit code against the LP64 expectations.
+                exe = HERE / "tests" / f"{name}.elf"
+                tinyc_cmd = [str(TINYC), "--emit=elf", *LOWERING_FLAG,
+                             *HOST_VARARGS_FLAG,
+                             *unity_include_flags(),
+                             "-o", str(exe)]
+                tinyc_cmd.append(str(unity_src))
+                r = run(tinyc_cmd)
+                if r.returncode != 0:
+                    print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                    failures += 1
+                    continue
+                r = run([str(exe)])
+                if r.returncode != expected_rc:
+                    print(f"FAIL {name}: elf exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                    failures += 1
+                    continue
+                if r.stdout != expected:
+                    print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                    failures += 1
+                    continue
+                print(f"PASS {name}")
+                continue
+
+            if TARGET == "macho":
+                exe = HERE / "tests" / f"{name}.macho"
+
+                # The llvm_via_wasm sub-backend goes through the lifter:
+                #   per-source --emit=wasm + wasm-ld + --from-wasm <linked.wasm>
+                # so it always exercises the full wasm-linker pipeline before
+                # touching the llvm backend. This is the only way to get
+                # per-TU isolation that tinyc itself doesn't provide for the
+                # joint multi-source --emit=macho invocation.
+                if MACHO_BACKEND == "llvm_via_wasm":
+                    via_backend = "llvm"
+                    obj_j = HERE / "tests" / f"{name}.macho.wasm.o"
+                    r = run([str(TINYC), "--emit=wasm", *LOWERING_FLAG,
+                             *unity_include_flags(),
+                             "-o", str(obj_j),
+                             str(unity_src)])
+                    if r.returncode != 0:
+                        print(f"FAIL {name}: tinyc --emit=wasm returned {r.returncode}\nstderr:\n{r.stderr}")
+                        failures += 1
+                        continue
+                    linked_wasm = HERE / "tests" / f"{name}.macho.linked.wasm"
+                    r = link_wasm([obj_j], linked_wasm)
+                    if r.returncode != 0:
+                        print(f"FAIL {name}: wasm-ld failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
+                        failures += 1
+                        continue
+                    r = run([str(TINYC), "--from-wasm", str(linked_wasm),
+                             "--emit=macho", f"--macho-backend={via_backend}",
+                             "--host-platform", str(HOST_PLATFORM),
+                             "--wasi-adapter", str(WASI_ADAPTER),
+                             "-I", str(COREC_DIR), "-I", str(ROOT),
+                             "-o", str(exe)])
+                    if r.returncode != 0:
+                        print(f"FAIL {name}: tinyc --from-wasm returned {r.returncode}\nstderr:\n{r.stderr}")
+                        failures += 1
+                        continue
+                    created_file = t.get("created_file")
+                    created_path = ROOT / created_file if created_file else None
+                    if created_path is not None:
+                        created_path.unlink(missing_ok=True)
+                    # Same retry-on-SIGKILL dance as the regular macho path.
+                    r = run([str(exe)])
+                    if r.returncode == -9:
+                        r = run([str(exe)])
+                    if r.returncode != expected_rc:
+                        print(f"FAIL {name}: macho exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                        failures += 1
+                        continue
+                    if r.stdout != expected:
+                        print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
+                        failures += 1
+                        continue
+                    if created_path is not None:
+                        expected_mode = t["expected_file_mode"] & ~current_umask
+                        try:
+                            actual_mode = created_path.stat().st_mode & 0o777
+                        except FileNotFoundError:
+                            print(f"FAIL {name}: expected file was not created: {created_path}")
+                            failures += 1
+                            continue
+                        created_path.unlink()
+                        if actual_mode != expected_mode:
+                            print(f"FAIL {name}: file mode mismatch\n"
+                                  f"  expected: {expected_mode:#05o}\n"
+                                  f"  got:      {actual_mode:#05o}")
+                            failures += 1
+                            continue
+                    print(f"PASS {name}")
+                    continue
+
+                # Stage 1: tinyc emits wasm32 object, links it with the wasm
+                # runtime + _start shim, and translates the linked module to
+                # a signed Mach-O ARM64 binary — all in one invocation.
+                # The `llvm` backend uses native host pointers and synthesises
+                # its own runtime. The wasm backend needs no external support
+                # objects either: va_arg is lowered inline and `_start` comes from
+                # tinyC-compiled platform_wasm.c folded into the single-TU root.
+                tinyc_cmd = [str(TINYC), "--emit=macho", *LOWERING_FLAG,
+                             *unity_include_flags(),
+                             "-o", str(exe)]
+                if MACHO_BACKEND == "llvm":
+                    tinyc_cmd.append("--macho-backend=llvm")
+                tinyc_cmd.append(str(unity_src))
+                r = run(tinyc_cmd)
+                if r.returncode != 0:
+                    print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                    failures += 1
+                    continue
+
+                # Stage 2: run the produced Mach-O binary directly. macOS
+                # AMFI occasionally SIGKILLs freshly ad-hoc-codesigned
+                # binaries the first time they're launched (the kernel's
+                # signature-verification daemon races with the kernel
+                # exec path). Retry once on SIGKILL — the second launch
+                # always succeeds because the signature is now cached.
                 r = run([str(exe)])
                 if r.returncode == -9:
                     r = run([str(exe)])
@@ -829,56 +901,53 @@ def main():
                     print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
                     failures += 1
                     continue
-                if created_path is not None:
-                    current_umask = os.umask(0)
-                    os.umask(current_umask)
-                    expected_mode = t["expected_file_mode"] & ~current_umask
-                    try:
-                        actual_mode = created_path.stat().st_mode & 0o777
-                    except FileNotFoundError:
-                        print(f"FAIL {name}: expected file was not created: {created_path}")
-                        failures += 1
-                        continue
-                    created_path.unlink()
-                    if actual_mode != expected_mode:
-                        print(f"FAIL {name}: file mode mismatch\n"
-                              f"  expected: {expected_mode:#05o}\n"
-                              f"  got:      {actual_mode:#05o}")
-                        failures += 1
-                        continue
+
                 print(f"PASS {name}")
                 continue
 
-            # Stage 1: tinyc emits wasm32 object, links it with the wasm
-            # runtime + _start shim, and translates the linked module to
-            # a signed Mach-O ARM64 binary — all in one invocation.
-            # The `llvm` backend uses native host pointers and synthesises
-            # its own runtime. The wasm backend needs no external support
-            # objects either: va_arg is lowered inline and `_start` comes from
-            # tinyC-compiled platform_wasm.c folded into the single-TU root.
-            tinyc_cmd = [str(TINYC), "--emit=macho", *LOWERING_FLAG,
-                         *unity_include_flags(),
-                         "-o", str(exe)]
-            if MACHO_BACKEND == "llvm":
-                tinyc_cmd.append("--macho-backend=llvm")
-            tinyc_cmd.append(str(unity_src))
-            r = run(tinyc_cmd)
+            ll  = HERE / "tests" / f"{name}.ll"
+            obj = HERE / "tests" / (f"{name}.obj" if IS_WIN else f"{name}.o")
+            exe = HERE / "tests" / (f"{name}.exe" if IS_WIN else f"{name}.bin")
+
+            # Stage 1: emit LLVM IR from the generated single-TU root.
+            if unity_src is not None:
+                tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
+                                  *HOST_VARARGS_FLAG, *TARGET_FLAG,
+                                  *unity_include_flags(), str(unity_src)]
+            else:
+                tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
+                                  *HOST_VARARGS_FLAG, *TARGET_FLAG,
+                                  *unity_include_flags(),
+                                  *[str(s) for s in srcs]]
+            r = run(tinyc_llvm_cmd)
             if r.returncode != 0:
-                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}")
+                print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}\nstdout (first 200 chars):\n{r.stdout[:200]}")
+                failures += 1
+                continue
+            if not r.stdout.strip():
+                print(f"FAIL {name}: tinyc produced empty LLVM IR\nstderr:\n{r.stderr}")
+                failures += 1
+                continue
+            ll.write_text(r.stdout)
+
+            # Stage 2: compile .ll -> .o/.obj with llc (works regardless of $CC),
+            # then link with the platform compiler.
+            r = run([LLC, "-filetype=obj", str(ll), "-o", str(obj)])
+            if r.returncode != 0:
+                print(f"FAIL {name}: llc failed\nstderr:\n{r.stderr}")
+                failures += 1
+                continue
+            host_srcs = [HERE / "tests" / s for s in t.get("host_sources", [])]
+            r = link_native(obj, exe, host_srcs)
+            if r.returncode != 0:
+                print(f"FAIL {name}: link failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
                 failures += 1
                 continue
 
-            # Stage 2: run the produced Mach-O binary directly. macOS
-            # AMFI occasionally SIGKILLs freshly ad-hoc-codesigned
-            # binaries the first time they're launched (the kernel's
-            # signature-verification daemon races with the kernel
-            # exec path). Retry once on SIGKILL — the second launch
-            # always succeeds because the signature is now cached.
+            # Stage 3: run
             r = run([str(exe)])
-            if r.returncode == -9:
-                r = run([str(exe)])
             if r.returncode != expected_rc:
-                print(f"FAIL {name}: macho exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
+                print(f"FAIL {name}: binary exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
                 failures += 1
                 continue
             if r.stdout != expected:
@@ -887,60 +956,20 @@ def main():
                 continue
 
             print(f"PASS {name}")
-            continue
+        return failures, skipped, out
 
-        ll  = HERE / "tests" / f"{name}.ll"
-        obj = HERE / "tests" / (f"{name}.obj" if IS_WIN else f"{name}.o")
-        exe = HERE / "tests" / (f"{name}.exe" if IS_WIN else f"{name}.bin")
-
-        # Stage 1: emit LLVM IR from the generated single-TU root.
-        if unity_src is not None:
-            tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
-                              *HOST_VARARGS_FLAG, *TARGET_FLAG,
-                              *unity_include_flags(), str(unity_src)]
-        else:
-            tinyc_llvm_cmd = [str(TINYC), "--emit=llvm", *LOWERING_FLAG,
-                              *HOST_VARARGS_FLAG, *TARGET_FLAG,
-                              *unity_include_flags(),
-                              *[str(s) for s in srcs]]
-        r = run(tinyc_llvm_cmd)
-        if r.returncode != 0:
-            print(f"FAIL {name}: tinyc returned {r.returncode}\nstderr:\n{r.stderr}\nstdout (first 200 chars):\n{r.stdout[:200]}")
-            failures += 1
-            continue
-        if not r.stdout.strip():
-            print(f"FAIL {name}: tinyc produced empty LLVM IR\nstderr:\n{r.stderr}")
-            failures += 1
-            continue
-        ll.write_text(r.stdout)
-
-        # Stage 2: compile .ll -> .o/.obj with llc (works regardless of $CC),
-        # then link with the platform compiler.
-        r = run([LLC, "-filetype=obj", str(ll), "-o", str(obj)])
-        if r.returncode != 0:
-            print(f"FAIL {name}: llc failed\nstderr:\n{r.stderr}")
-            failures += 1
-            continue
-        host_srcs = [HERE / "tests" / s for s in t.get("host_sources", [])]
-        r = link_native(obj, exe, host_srcs)
-        if r.returncode != 0:
-            print(f"FAIL {name}: link failed\nstderr:\n{r.stderr}\nstdout:\n{r.stdout}")
-            failures += 1
-            continue
-
-        # Stage 3: run
-        r = run([str(exe)])
-        if r.returncode != expected_rc:
-            print(f"FAIL {name}: binary exited with status {r.returncode} (expected {expected_rc})\nstdout: {r.stdout!r}\nstderr: {r.stderr!r}")
-            failures += 1
-            continue
-        if r.stdout != expected:
-            print(f"FAIL {name}: stdout mismatch\n  expected: {expected!r}\n  got:      {r.stdout!r}")
-            failures += 1
-            continue
-
-        print(f"PASS {name}")
-
+    jobs_env = os.environ.get("TINYC_TEST_JOBS")
+    jobs = int(jobs_env) if jobs_env else min(os.cpu_count() or 1, 8)
+    if jobs <= 1 or len(tests) <= 1:
+        results = [_run_one(t) for t in tests]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(_run_one, tests))
+    for f_cnt, s_cnt, out in results:
+        failures += f_cnt
+        skipped += s_cnt
+        for line in out:
+            print(line)
     if failures:
         print(f"\n{failures} test(s) failed")
         return 1
