@@ -1845,6 +1845,12 @@ targets = ["elf"]
 expected_stdout = "first\ncaught 42\nzero-becomes 1\n"
 
 [[test]]
+name = "struct_array_of_struct_field"
+targets = ["native", "wasm", "macho", "elf"]
+# Arrays of structs as struct fields (#340).
+expected_stdout = "44 1071 1168 400\n"
+
+[[test]]
 name = "struct_init_and_fields"
 targets = ["native", "wasm", "macho", "elf"]
 # Fnptr+plain multi-decl field (#382), typedef'd struct-ptr & / ** (#366),

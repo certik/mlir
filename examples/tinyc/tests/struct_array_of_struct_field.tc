@@ -1,0 +1,33 @@
+extern int printf(const char *fmt, ...);
+
+typedef struct Point { int x; int y; } Point;
+
+struct Poly {
+    int count;
+    struct Point pts[3];
+    Point more[2];
+};
+
+static int sum_poly(struct Poly p) {
+    int s = p.count;
+    for (int i = 0; i < 3; i++) s += p.pts[i].x + p.pts[i].y;
+    for (int i = 0; i < 2; i++) s += p.more[i].x + p.more[i].y;
+    return s;
+}
+
+int main(void) {
+    struct Poly a;
+    a.count = 5;
+    for (int i = 0; i < 3; i++) {
+        a.pts[i].x = i + 1;
+        a.pts[i].y = (i + 1) * 10;
+    }
+    a.more[0].x = 100; a.more[0].y = 200;
+    a.more[1].x = 300; a.more[1].y = 400;
+
+    struct Poly b = a;
+    b.pts[1].x = 99;
+    struct Poly *pp = &b;
+    printf("%d %d %d %d\n", (int)sizeof(struct Poly), sum_poly(a), sum_poly(b), pp->more[1].y);
+    return 0;
+}

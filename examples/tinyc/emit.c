@@ -502,9 +502,16 @@ static MLIR_TypeHandle scalar_mem_type(E *e, const Type *t) {
 
 static MLIR_TypeHandle local_slot_type(E *e, string name, const Type *t, bool *wide);
 
+static MLIR_TypeHandle find_struct_type(E *e, StructDef *sd);
+
 // Element type of an array type `t` (TY_ARRAY_I32 / TY_ARRAY_F32 /
-// TY_ARRAY_PTR_*), not counting a second dimension.
+// TY_ARRAY_PTR_* / TY_ARRAY_STRUCT), not counting a second dimension.
 static MLIR_TypeHandle array_elem_type(E *e, const Type *t) {
+    if (t->kind == TY_ARRAY_STRUCT) {
+        StructDef *sd = find_struct(e, t->struct_name);
+        if (sd) return find_struct_type(e, sd);
+        return e->i32;
+    }
     if (t->kind == TY_ARRAY_F32) return e->f32;
     if (t->kind == TY_ARRAY_PTR_STRUCT || t->kind == TY_ARRAY_PTR_CHAR) return e->ptr;
     if (t->array_elem_is_i64) return e->i64;
@@ -2820,6 +2827,22 @@ static void emit_struct_copy_path(E *e, MLIR_ValueHandle dst, MLIR_ValueHandle s
         if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_copy_path(e, dst, src, source_elem, inner, path, n_path);
+        } else if (ft.kind == TY_ARRAY_STRUCT) {
+            StructDef *inner = find_struct(e, ft.struct_name);
+            bool is_2d = (ft.array_len2 != 0);
+            int64_t n1 = ft.array_len;
+            int64_t n2 = is_2d ? ft.array_len2 : 1;
+            for (int64_t a = 0; a < n1; a++) {
+                for (int64_t b = 0; b < n2; b++) {
+                    size_t inner_n = is_2d ? 2 : 1;
+                    size_t total = n_path + inner_n;
+                    int32_t *p2 = arena_new_array(e->arena, int32_t, total);
+                    for (size_t kk = 0; kk < n_path; kk++) p2[kk] = path[kk];
+                    p2[n_path] = (int32_t)a;
+                    if (is_2d) p2[n_path + 1] = (int32_t)b;
+                    emit_struct_copy_path(e, dst, src, source_elem, inner, p2, total);
+                }
+            }
         } else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
                    ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
                    ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) {
@@ -5632,6 +5655,22 @@ static void emit_struct_zero(E *e, MLIR_ValueHandle base, MLIR_TypeHandle source
         if (ft.kind == TY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             emit_struct_zero(e, base, source_elem, inner, path, n_path);
+        } else if (ft.kind == TY_ARRAY_STRUCT) {
+            StructDef *inner = find_struct(e, ft.struct_name);
+            bool is_2d = (ft.array_len2 != 0);
+            int64_t n1 = ft.array_len;
+            int64_t n2 = is_2d ? ft.array_len2 : 1;
+            for (int64_t a = 0; a < n1; a++) {
+                for (int64_t b = 0; b < n2; b++) {
+                    size_t inner_n = is_2d ? 2 : 1;
+                    size_t total = n_path + inner_n;
+                    int32_t *p2 = arena_new_array(e->arena, int32_t, total);
+                    for (size_t kk = 0; kk < n_path; kk++) p2[kk] = path[kk];
+                    p2[n_path] = (int32_t)a;
+                    if (is_2d) p2[n_path + 1] = (int32_t)b;
+                    emit_struct_zero(e, base, source_elem, inner, p2, total);
+                }
+            }
         } else if (ft.kind == TY_PTR_STRUCT || ft.kind == TY_PTR_I32 ||
                    ft.kind == TY_PTR_CHAR || ft.kind == TY_PTR_VOID ||
                    ft.kind == TY_PTR_PTR || ft.kind == TY_FNPTR) {
@@ -7653,7 +7692,7 @@ static bool struct_cycle_dfs(E *e, StructDef *sd, int *color, StructDef **stack,
     color[idx] = 1;
     for (size_t i = 0; i < sd->fields.size; i++) {
         Type ft = sd->fields.data[i].type;
-        if (ft.kind == TY_STRUCT) {
+        if (ft.kind == TY_STRUCT || ft.kind == TY_ARRAY_STRUCT) {
             StructDef *inner = find_struct(e, ft.struct_name);
             if (inner && struct_cycle_dfs(e, inner, color, stack, depth + 1)) return true;
         }
@@ -7719,7 +7758,8 @@ static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx) {
             MLIR_TypeHandle t = find_struct_type(e, inner);
             body[nb++] = t;
         } else if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
-                   ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR) {
+                   ft.kind == TY_ARRAY_PTR_STRUCT || ft.kind == TY_ARRAY_PTR_CHAR ||
+                   ft.kind == TY_ARRAY_STRUCT) {
             body[nb++] = array_mlir_type(e, &ft);
         } else {
             EMIT_ERR(e, "unsupported struct field type in {}", sd->name);

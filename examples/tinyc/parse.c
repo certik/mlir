@@ -2881,8 +2881,10 @@ static StructDef *parse_struct_def(P *p) {
                     expect(p, TC_TK_RBRACK, str_lit("expected ']'"));
                 }
                 // Map (element-type, dim) -> array TypeKind.
-                if (is_struct_kind && !is_ptr) {
-                    perror_at(p, cur(p).line, str_lit("array of nested struct value is not supported as a field"));
+                if (ft.kind == TY_STRUCT) {
+                    ft.kind = TY_ARRAY_STRUCT;
+                    ft.array_len = n1;
+                    ft.array_len2 = n2;
                 } else if (kind_is_ptr(ft.kind)) {
                     // `T *f[N]` or `T *f[N][M]`, also with a typedef'd pointer type T *.
                     make_ptr_array(p, &ft, n1, NULL);
