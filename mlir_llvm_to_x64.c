@@ -329,16 +329,16 @@ static inline void x64_emit2s(FnCtx *F, MLIR_OpType t, int64_t v, string sym) {
                         MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(F->ctx, sym));
 }
 
-// Register pool for the x86_64 backend. Arg registers (rcx/rdx/rsi/rdi/r8/r9)
-// and the implicit-clobber registers (rdx by mul/div, rcx by shifts) are kept
-// OUT of the pool, along with the rax/r11 scratch pair, so that param homing and
-// call-argument setup never alias a live home and need no parallel move. That
-// leaves r10 (caller-saved) + rbx/r12..r15 (callee-saved) allocatable.
+// Register pool for the x86_64 backend.
+// Caller-saved: r10, r8, r9, rsi, rdi (entry param homing and call arg setup
+// use parallel-move resolution so arg regs can live in the pool).
+// Callee-saved: rbx, r12..r15.
+// Kept outside pool as scratch/implicit-clobber regs: rax, rcx, rdx, r11.
 static RegTarget x64_regtarget(void) {
     RegTarget T; memset(&T, 0, sizeof(T));
-    T.npool = 6; T.ncaller = 1; T.nhome = 3;
-    T.pool[0] = R10;
-    T.pool[1] = RBX; T.pool[2] = R12; T.pool[3] = R13; T.pool[4] = R14; T.pool[5] = R15;
+    T.npool = 10; T.ncaller = 5; T.nhome = 3;
+    T.pool[0] = R10; T.pool[1] = R8; T.pool[2] = R9; T.pool[3] = RSI; T.pool[4] = RDI;
+    T.pool[5] = RBX; T.pool[6] = R12; T.pool[7] = R13; T.pool[8] = R14; T.pool[9] = R15;
     return T;
 }
 // True (with *reg set) if value `v` has a physical-register home.
