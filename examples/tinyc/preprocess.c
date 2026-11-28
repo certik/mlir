@@ -829,10 +829,12 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
     VecTcTok *v = pp->tok_out;
     if (v->size == v->max) pp_tctok_grow(v);
     TcTok *dst = &v->data[v->size];
+    uint16_t fid = (uint16_t)(t->file_id + 1);
     switch (t->kind) {
     case PP_IDENT:
         dst->kind = (uint8_t)tinyc_keyword_or_ident(t->text);
         dst->flags = 0;
+        dst->file_id = fid;
         dst->line = t->line;
         dst->text_str = t->text.str;
         dst->d.size = t->text.size;
@@ -847,12 +849,13 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
             k = pp_punct_kind(t->text);
         }
         if (k == TC_TK_EOF) {
-            println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
-                    (int64_t)t->line, t->text);
+            println(str_lit("tinyc lex error at {}:{}: unexpected '{}'"),
+                    pp->files[t->file_id], (int64_t)t->line, t->text);
             return;
         }
         dst->kind = (uint8_t)k;
         dst->flags = 0;
+        dst->file_id = fid;
         dst->line = t->line;
         v->size++;
         return;
@@ -864,6 +867,7 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
         if (n == 1 && s[0] >= '0' && s[0] <= '9') {
             dst->kind = TC_TK_INT_LIT;
             dst->flags = 0;
+            dst->file_id = fid;
             dst->line = t->line;
             dst->d.int_value = (int64_t)(s[0] - '0');
             v->size++;
@@ -880,6 +884,7 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
             if (all_dig) {
                 dst->kind = TC_TK_INT_LIT;
                 dst->flags = 0;
+                dst->file_id = fid;
                 dst->line = t->line;
                 dst->d.int_value = val;
                 v->size++;
@@ -887,6 +892,7 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
             }
         }
         *dst = tinyc_lex_number(t->text, t->line);
+        dst->file_id = fid;
         v->size++;
         return;
     }
@@ -901,6 +907,7 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
             buf[slen] = '\0';
             dst->kind = TC_TK_STRING_LIT;
             dst->flags = 0;
+            dst->file_id = fid;
             dst->line = t->line;
             dst->text_str = buf;
             dst->d.size = slen + 1;
@@ -908,11 +915,13 @@ static void pp_emit_tctok(PP *pp, const PPTok *t) {
             return;
         }
         *dst = tinyc_lex_string(pp->arena, t->text, t->line);
+        dst->file_id = fid;
         v->size++;
         return;
     }
     case PP_CHAR:
         *dst = tinyc_lex_char(t->text, t->line);
+        dst->file_id = fid;
         v->size++;
         return;
     default:
@@ -965,10 +974,30 @@ static bool hide_contains(PPHide *h, string name) {
     return false;
 }
 static PPHide *hide_add(Arena *arena, PPHide *h, string name) {
+    if (hide_contains(h, name)) return h;
     PPHide *n = arena_new(arena, PPHide);
     n->name = name;
     n->next = h;
     return n;
+}
+static PPHide *hide_union(Arena *arena, PPHide *a, PPHide *b) {
+    if (!a) return b;
+    if (!b) return a;
+    PPHide *res = b;
+    for (PPHide *p = a; p; p = p->next) {
+        if (!hide_contains(res, p->name))
+            res = hide_add(arena, res, p->name);
+    }
+    return res;
+}
+static PPHide *hide_intersect(Arena *arena, PPHide *a, PPHide *b) {
+    if (!a || !b) return NULL;
+    PPHide *res = NULL;
+    for (PPHide *p = a; p; p = p->next) {
+        if (hide_contains(b, p->name))
+            res = hide_add(arena, res, p->name);
+    }
+    return res;
 }
 
 // Stringize a sequence of tokens into a string-literal PP token.
@@ -1298,8 +1327,10 @@ static bool pp_slice_next_tok(PP *pp, PPSlice *stk, size_t *sp, PPTok *out) {
 }
 
 static bool collect_args_slices(PP *pp, PPSlice *stk, size_t *sp,
-                                Macro *m, VecPPTok *args, size_t *saved_arg_exp) {
+                                Macro *m, VecPPTok *args, size_t *saved_arg_exp,
+                                PPHide **out_rparen_hide) {
     PPTok t;
+    if (out_rparen_hide) *out_rparen_hide = NULL;
     while (pp_slice_next_tok(pp, stk, sp, &t)) {
         if (t.kind == PP_NEWLINE) continue;
         break;
@@ -1317,7 +1348,10 @@ static bool collect_args_slices(PP *pp, PPSlice *stk, size_t *sp,
         if (t.kind == PP_NEWLINE) continue;
         if (is_punct1(&t, '(')) depth++;
         else if (is_punct1(&t, ')')) {
-            if (depth == 0) break;
+            if (depth == 0) {
+                if (out_rparen_hide) *out_rparen_hide = t.hide;
+                break;
+            }
             depth--;
         } else if (is_punct1(&t, ',') && depth == 0) {
             if (m->is_variadic && arg_idx >= m->n_params) {
@@ -1426,6 +1460,7 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         TcTok *dst = &vd[vsz++];
                         dst->kind = (uint8_t)k;
                         dst->flags = 0;
+                        dst->file_id = (uint16_t)(tp->file_id + 1);
                         dst->line = tp->line;
                         pos++;
                         continue;
@@ -1442,6 +1477,7 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         TcTok *dst = &vd[vsz++];
                         dst->kind = (uint8_t)tinyc_keyword_or_ident(tp->text);
                         dst->flags = 0;
+                        dst->file_id = (uint16_t)(tp->file_id + 1);
                         dst->line = tp->line;
                         dst->text_str = tp->text.str;
                         dst->d.size = tp->text.size;
@@ -1480,6 +1516,7 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                             TcTok *dst = &vd[vsz++];
                             dst->kind = TC_TK_INT_LIT;
                             dst->flags = 0;
+                            dst->file_id = (uint16_t)(tp->file_id + 1);
                             dst->line = tp->line;
                             dst->d.int_value = val;
                             pos++;
@@ -1503,6 +1540,7 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                     TcTok *dst = &vd[vsz++];
                     dst->kind = TC_TK_STRING_LIT;
                     dst->flags = 0;
+                    dst->file_id = (uint16_t)(tp->file_id + 1);
                     dst->line = tp->line;
                     dst->text_str = buf;
                     dst->d.size = slen + 1;
@@ -1603,7 +1641,9 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         substitute(pp, m, NULL, &inner);
                         m->expanding = false;
                         if (inner.size > 0) {
-                            PPHide *shared_hide = &m->self_hide;
+                            PPHide *base_hide = t.hide
+                                ? hide_add(pp->arena, t.hide, m->name)
+                                : &m->self_hide;
                             size_t start_idx = pp->exp_top;
                             PPTok *dst = pp_exp_alloc(pp, inner.size);
                             for (size_t k = 0; k < inner.size; k++) {
@@ -1611,8 +1651,8 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                                 dst[k].line = t.line;
                                 dst[k].file_id = t.file_id;
                                 dst[k].hide = dst[k].hide
-                                    ? hide_add(pp->arena, dst[k].hide, m->name)
-                                    : shared_hide;
+                                    ? hide_union(pp->arena, dst[k].hide, base_hide)
+                                    : base_hide;
                             }
                             dst[0].has_space = t.has_space;
                             if (sp == stk_cap) {
@@ -1635,7 +1675,8 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         VecPPTok *args = (expected <= 16) ? args_stk
                             : arena_new_array(pp->arena, VecPPTok, expected);
                         size_t saved_arg_exp = pp->exp_top;
-                        if (!collect_args_slices(pp, stk, &sp, m, args, &saved_arg_exp)) {
+                        PPHide *rparen_hide = NULL;
+                        if (!collect_args_slices(pp, stk, &sp, m, args, &saved_arg_exp, &rparen_hide)) {
                             pp->exp_top = saved_arg_exp;
                             continue;
                         }
@@ -1656,7 +1697,12 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                         // Rewind argument token storage before pushing inner!
                         pp->exp_top = saved_arg_exp;
                         if (inner.size > 0) {
-                            PPHide *shared_hide = &m->self_hide;
+                            PPHide *inter = (t.hide && rparen_hide)
+                                ? hide_intersect(pp->arena, t.hide, rparen_hide)
+                                : NULL;
+                            PPHide *base_hide = inter
+                                ? hide_add(pp->arena, inter, m->name)
+                                : &m->self_hide;
                             size_t start_idx = pp->exp_top;
                             PPTok *dst = pp_exp_alloc(pp, inner.size);
                             for (size_t k = 0; k < inner.size; k++) {
@@ -1664,8 +1710,8 @@ static size_t expand_tokens_ex(PP *pp, PPTok *toks, size_t n, VecPPTok *out,
                                 dst[k].line = t.line;
                                 dst[k].file_id = t.file_id;
                                 dst[k].hide = dst[k].hide
-                                    ? hide_add(pp->arena, dst[k].hide, m->name)
-                                    : shared_hide;
+                                    ? hide_union(pp->arena, dst[k].hide, base_hide)
+                                    : base_hide;
                             }
                             dst[0].has_space = t.has_space;
                             if (sp == stk_cap) {
@@ -1988,6 +2034,14 @@ static void pragma_once_angle_add(PP *pp, string name) {
     pp->pragma_once_angle = n;
 }
 
+static bool is_abs_path(string p) {
+    if (p.size >= 1 && (p.str[0] == '/' || p.str[0] == '\\')) return true;
+    if (p.size >= 3 &&
+        ((p.str[0] >= 'a' && p.str[0] <= 'z') || (p.str[0] >= 'A' && p.str[0] <= 'Z')) &&
+        p.str[1] == ':' && (p.str[2] == '/' || p.str[2] == '\\')) return true;
+    return false;
+}
+
 // Find the include file and read it (once: the contents are what
 // process_file() then tokenizes). Checks pragma_once_seen BEFORE reading
 // from disk so repeated includes of `#pragma once` headers do zero I/O.
@@ -1997,6 +2051,11 @@ static bool resolve_include(PP *pp, string from_file, string name, bool angle,
     if (angle && pragma_once_angle_seen(pp, name)) {
         *already_seen = true;
         return true;
+    }
+    if (is_abs_path(name)) {
+        if (pragma_once_seen(pp, name)) { *out = name; *already_seen = true; return true; }
+        if (read_file(pp->arena, name, out_src)) { *out = name; return true; }
+        return false;
     }
     if (!angle) {
         // First: relative to the directory of `from_file`.
@@ -2411,6 +2470,7 @@ static bool pp_lex_scan_macro_args(const char *s, size_t sz, size_t p, int line,
 static void process_file_lex(PP *pp, string path, string src) {
     string canonical = s_dup(pp->arena, path);
     uint16_t file_id = pp_intern_file(pp, canonical);
+    uint16_t tok_fid = (uint16_t)(file_id + 1);
     if (src.size > 0 && src.str[src.size - 1] == '\0') src.size -= 1;
 
     const char *s = src.str;
@@ -2465,6 +2525,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = (uint8_t)tinyc_keyword_or_ident(ident);
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->text_str = ident.str;
                 dst->d.size = ident.size;
@@ -2477,6 +2538,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = (uint8_t)tinyc_keyword_or_ident(ident);
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->text_str = ident.str;
                 dst->d.size = ident.size;
@@ -2492,6 +2554,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = TC_TK_STRING_LIT;
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->text_str = buf;
                 dst->d.size = tf.size + 1;
@@ -2503,6 +2566,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = TC_TK_INT_LIT;
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->d.int_value = (int64_t)line;
                 i = j;
@@ -2514,6 +2578,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = (uint8_t)tinyc_keyword_or_ident(ident);
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->text_str = ident.str;
                 dst->d.size = ident.size;
@@ -2529,6 +2594,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                         TcTok *dst = &vd[vsz++];
                         dst->kind = (uint8_t)tinyc_keyword_or_ident(one.text);
                         dst->flags = 0;
+                        dst->file_id = tok_fid;
                         dst->line = line;
                         dst->text_str = one.text.str;
                         dst->d.size = one.text.size;
@@ -2541,6 +2607,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                         TcTok *dst = &vd[vsz++];
                         dst->kind = TC_TK_INT_LIT;
                         dst->flags = 0;
+                        dst->file_id = tok_fid;
                         dst->line = line;
                         dst->d.int_value = (int64_t)(one.text.str[0] - '0');
                         i = j;
@@ -2676,6 +2743,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = (uint8_t)tinyc_keyword_or_ident(ident);
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->text_str = ident.str;
                 dst->d.size = ident.size;
@@ -2688,6 +2756,7 @@ static void process_file_lex(PP *pp, string path, string src) {
             TcTok *dst = &vd[vsz++];
             dst->kind = g_pp_punct1[(unsigned char)c];
             dst->flags = 0;
+            dst->file_id = tok_fid;
             dst->line = line;
             i++;
             at_line_start = false;
@@ -2808,6 +2877,7 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = TC_TK_INT_LIT;
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = line;
                 dst->d.int_value = val;
                 i = j;
@@ -2825,7 +2895,8 @@ static void process_file_lex(PP *pp, string path, string src) {
                 break;
             }
             LEX_ENSURE();
-            vd[vsz++] = tinyc_lex_number((string){(char *)(s + i), j - i}, line);
+            vd[vsz] = tinyc_lex_number((string){(char *)(s + i), j - i}, line);
+            vd[vsz++].file_id = tok_fid;
             i = j;
             at_line_start = false;
             continue;
@@ -2865,12 +2936,14 @@ static void process_file_lex(PP *pp, string path, string src) {
                 TcTok *dst = &vd[vsz++];
                 dst->kind = TC_TK_STRING_LIT;
                 dst->flags = 0;
+                dst->file_id = tok_fid;
                 dst->line = start_line;
                 dst->text_str = buf;
                 dst->d.size = slen + 1;
             } else {
                 LEX_ENSURE();
-                vd[vsz++] = tinyc_lex_string(pp->arena, (string){(char *)(s + i), j - i}, start_line);
+                vd[vsz] = tinyc_lex_string(pp->arena, (string){(char *)(s + i), j - i}, start_line);
+                vd[vsz++].file_id = tok_fid;
             }
             i = j;
             at_line_start = false;
@@ -2884,7 +2957,8 @@ static void process_file_lex(PP *pp, string path, string src) {
             }
             if (j < sz) j++;
             LEX_ENSURE();
-            vd[vsz++] = tinyc_lex_char((string){(char *)(s + i), j - i}, line);
+            vd[vsz] = tinyc_lex_char((string){(char *)(s + i), j - i}, line);
+            vd[vsz++].file_id = tok_fid;
             i = j;
             at_line_start = false;
             continue;
@@ -2906,7 +2980,8 @@ static void process_file_lex(PP *pp, string path, string src) {
                 break;
             }
             LEX_ENSURE();
-            vd[vsz++] = tinyc_lex_number((string){(char *)(s + i), j - i}, line);
+            vd[vsz] = tinyc_lex_number((string){(char *)(s + i), j - i}, line);
+            vd[vsz++].file_id = tok_fid;
             i = j;
             at_line_start = false;
             continue;
@@ -2989,11 +3064,12 @@ static void process_file_lex(PP *pp, string path, string src) {
             TcTok *dst = &vd[vsz++];
             dst->kind = (uint8_t)pk;
             dst->flags = 0;
+            dst->file_id = tok_fid;
             dst->line = line;
         } else {
             string bad = {(char *)(s + i), 1};
-            println(str_lit("tinyc lex error at line {}: unexpected '{}'"),
-                    (int64_t)line, bad);
+            println(str_lit("tinyc lex error at {}:{}: unexpected '{}'"),
+                    canonical, (int64_t)line, bad);
         }
         i += plen;
     }
@@ -3053,6 +3129,16 @@ static int g_last_preprocess_errors = 0;
 
 int tinyc_last_preprocess_errors(void) { return g_last_preprocess_errors; }
 
+static void pp_define_num(PP *pp, const char *name, const char *val) {
+    Macro *m = macro_define(pp, s_lit(name));
+    PPTok tok = {0};
+    tok.kind = PP_NUMBER;
+    tok.text = s_lit(val);
+    m->body = arena_new_array(pp->arena, PPTok, 1);
+    m->body[0] = tok;
+    m->n_body = 1;
+}
+
 static void pp_init_state(PP *pp, Arena *arena,
                           string *include_dirs, size_t n_include_dirs,
                           string *defines, size_t n_defines) {
@@ -3065,13 +3151,19 @@ static void pp_init_state(PP *pp, Arena *arena,
     macro_get_slot(pp, s_lit("__FILE__"))->special = PP_SPECIAL_FILE;
     macro_get_slot(pp, s_lit("__LINE__"))->special = PP_SPECIAL_LINE;
 
-    Macro *tcm = macro_define(pp, s_lit("__TINYC__"));
-    PPTok one = {0};
-    one.kind = PP_NUMBER;
-    one.text = s_lit("1");
-    tcm->body = arena_new_array(arena, PPTok, 1);
-    tcm->body[0] = one;
-    tcm->n_body = 1;
+    pp_define_num(pp, "__TINYC__", "1");
+    pp_define_num(pp, "__STDC__", "1");
+    pp_define_num(pp, "__STDC_VERSION__", "201112L");
+    pp_define_num(pp, "__STDC_HOSTED__", "1");
+    pp_define_num(pp, "__CHAR_BIT__", "8");
+    pp_define_num(pp, "__SIZEOF_SHORT__", "2");
+    pp_define_num(pp, "__SIZEOF_INT__", "4");
+    pp_define_num(pp, "__SIZEOF_LONG_LONG__", "8");
+    pp_define_num(pp, "__SIZEOF_FLOAT__", "4");
+    pp_define_num(pp, "__SIZEOF_DOUBLE__", "8");
+    pp_define_num(pp, "__BYTE_ORDER__", "1234");
+    pp_define_num(pp, "__ORDER_LITTLE_ENDIAN__", "1234");
+    pp_define_num(pp, "__ORDER_BIG_ENDIAN__", "4321");
 
     uint16_t cmdline_fid = pp_intern_file(pp, s_lit("<command-line>"));
     for (size_t k = 0; k < n_defines; k++) {
@@ -3139,9 +3231,11 @@ VecTcTok tinyc_preprocess_lex(Arena *arena, string path,
     process_file_lex(&pp, path, main_src);
     TcTok eof = {0};
     eof.kind = TC_TK_EOF;
+    eof.file_id = toks.size > 0 ? toks.data[toks.size - 1].file_id : 1;
     eof.line = toks.size > 0 ? toks.data[toks.size - 1].line : 1;
     if (toks.size == toks.max) pp_tctok_grow(&toks);
     toks.data[toks.size++] = eof;
+    tinyc_set_last_lex_files(pp.files, pp.n_files);
     g_last_preprocess_errors = pp.n_errors;
     return toks;
 }

@@ -52,6 +52,7 @@ typedef struct {
     // variables into unique module-scope global names.
     string cur_func_name;
     int    static_local_counter;
+    uint16_t file_id_base;
 } P;
 
 static TcTok cur(P *p) { return p->toks[p->i]; }
@@ -286,8 +287,25 @@ static int64_t neg_int_lit(P *p, TcTok t) {
     return v;
 }
 
+static uint16_t tok_file_id(P *p, TcTok t) {
+    return t.file_id ? (uint16_t)(t.file_id + p->file_id_base) : 0;
+}
+
 static void perror_at(P *p, int line, string msg) {
-    println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
+    uint16_t fid = 0;
+    if (p->i < p->n) {
+        TcTok ct = p->toks[p->i];
+        if (p->i > 0 && ct.line != line && p->toks[p->i - 1].line == line)
+            fid = tok_file_id(p, p->toks[p->i - 1]);
+        else
+            fid = tok_file_id(p, ct);
+    }
+    if (fid > 0 && p->prog && fid <= p->prog->n_source_files) {
+        println(str_lit("tinyc parse error at {}:{}: {}"),
+                p->prog->source_files[fid - 1], (int64_t)line, msg);
+    } else {
+        println(str_lit("tinyc parse error at line {}: {}"), (int64_t)line, msg);
+    }
     p->err_count++;
 }
 
@@ -306,6 +324,7 @@ static Expr *new_expr(P *p, ExprKind k, int line) {
     *e = (Expr){0};
     e->kind = k;
     e->line = line;
+    e->file_id = tok_file_id(p, cur(p));
     if (k == EX_CALL || k == EX_COMPOUND || k == EX_GENERIC) {
         e->extra = arena_new(p->arena, ExprExtra);
         *e->extra = (ExprExtra){0};
@@ -318,6 +337,7 @@ static Stmt *new_stmt(P *p, StmtKind k, int line) {
     *s = (Stmt){0};
     s->kind = k;
     s->line = line;
+    s->file_id = tok_file_id(p, cur(p));
     if (k == ST_IF || k == ST_WHILE || k == ST_DO_WHILE ||
         k == ST_FOR || k == ST_BLOCK || k == ST_SWITCH) {
         VecStmtPtr_reserve(p->arena, &s->body, 4);
@@ -2429,6 +2449,7 @@ static Func *parse_func(P *p) {
     f->name = tc_tok_text(name);
     f->return_type = ret_ty;
     f->line = line;
+    f->file_id = tok_file_id(p, cur(p));
     f->wasm_import_module = attrs.import_module;
     f->wasm_import_name = attrs.import_name;
     f->wasm_export_name = attrs.export_name;
@@ -2594,6 +2615,7 @@ static StructDef *parse_struct_def(P *p) {
     *sd = (StructDef){0};
     sd->name = name;
     sd->line = line;
+    sd->file_id = tok_file_id(p, cur(p));
     sd->is_union = is_union;
     VecStructField_reserve(p->arena, &sd->fields, 4);
     while (cur(p).kind != TC_TK_RBRACE && cur(p).kind != TC_TK_EOF) {
@@ -3066,6 +3088,7 @@ static void parse_typedef_decl(P *p) {
                 *sd = (StructDef){0};
                 sd->name = tag;
                 sd->line = line;
+                sd->file_id = tok_file_id(p, cur(p));
                 VecStructField_reserve(arena, &sd->fields, 0);
                 size_t si = prog->structs.size;
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
@@ -3203,6 +3226,25 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
         for (size_t i = 0; i < prog->globals.size; i++)
             idx_insert(&p, p.gl_buckets, prog->globals.data[i].name, i);
     }
+    {
+        size_t nlf = 0;
+        string *lf = tinyc_last_lex_files(&nlf);
+        p.file_id_base = (uint16_t)prog->n_source_files;
+        if (nlf > 0 && lf) {
+            size_t need = prog->n_source_files + nlf;
+            if (need > prog->source_files_cap) {
+                size_t ncap = prog->source_files_cap ? prog->source_files_cap * 2 : 32;
+                while (ncap < need) ncap *= 2;
+                string *nf = arena_new_array(arena, string, ncap);
+                for (size_t fi = 0; fi < prog->n_source_files; fi++)
+                    nf[fi] = prog->source_files[fi];
+                prog->source_files = nf;
+                prog->source_files_cap = ncap;
+            }
+            for (size_t fi = 0; fi < nlf; fi++)
+                prog->source_files[prog->n_source_files++] = lf[fi];
+        }
+    }
     while (cur(&p).kind != TC_TK_EOF) {
         // Top-level storage-class qualifiers. Track `static` so we can emit
         // private linkage for static functions/globals.
@@ -3266,6 +3308,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                 *sd = (StructDef){0};
                 sd->name = nm;
                 sd->line = line;
+                sd->file_id = tok_file_id(&p, cur(&p));
                 VecStructField_reserve(arena, &sd->fields, 0);
                 size_t si = prog->structs.size;
                 VecStructDefPtr_push_back(arena, &prog->structs, sd);
@@ -3330,6 +3373,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                 // type; the pointer object itself stays writable.
                 g.is_const = false;
                 g.line = cur(&p).line;
+                g.file_id = tok_file_id(&p, cur(&p));
                 if (accept(&p, TC_TK_ASSIGN)) {
                     g.has_init = true;
                     if (cur(&p).kind == TC_TK_LBRACE) {
@@ -3360,6 +3404,7 @@ int tinyc_parse_into(Arena *arena, Program *prog, VecTcTok toks, bool target_was
                     g.type = tty;
                     if (gattrs.has_address_space) g.address_space = gattrs.address_space;
                     g.line = nm.line;
+                    g.file_id = tok_file_id(&p, nm);
                     // Optional array suffix `[N]` (or `[const-expr]`).
                     if (accept(&p, TC_TK_LBRACK)) {
                         int64_t alen = 0; Expr *aexpr = NULL;

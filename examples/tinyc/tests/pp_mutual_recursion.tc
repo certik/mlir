@@ -1,0 +1,20 @@
+extern int printf(const char *fmt, ...);
+
+#define A B
+#define B A
+
+#define f(x) g(x)
+#define g(x) f(x)
+
+#define P Q
+#define Q R
+#define R P
+
+static int f(int x) { return x + 1; }
+
+int main(void) {
+    int A = 41;
+    int P = 100;
+    printf("%d %d %d\n", A, f(A), P);
+    return 0;
+}
