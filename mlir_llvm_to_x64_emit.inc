@@ -1365,14 +1365,31 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             }
             return;
         }
-        uint8_t rv = val_reg_or_load(F, val, R11, nb > 4 ? 1 : 0);
         int32_t aoff;
         if (alloca_slot(F, addr, &aoff)) {
+            uint8_t rv = val_reg_or_load(F, val, R11, nb > 4 ? 1 : 0);
             store_rbp_sized(F, aoff - disp, rv, nb);
         } else {
-            uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
-            if (disp == 0) store_mem(F, ra, rv, nb);
-            else           store_mem_disp(F, ra, rv, nb, disp);
+            int64_t c_imm = 0;
+            bool is_imm_ok = false;
+            if (g_x64_opt_level >= 1 && (nb == 1 || nb == 2 || nb == 4 || nb == 8) &&
+                is_const(ctx, MLIR_GetValueDefiningOp(ctx, val), &c_imm)) {
+                if (nb == 1 && c_imm >= -128 && c_imm <= 255) is_imm_ok = true;
+                else if (nb == 2 && c_imm >= -32768 && c_imm <= 65535) is_imm_ok = true;
+                else if ((nb == 4 || nb == 8) && c_imm >= -32768 && c_imm <= 32767) is_imm_ok = true;
+            }
+            if (is_imm_ok) {
+                uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
+                uint64_t v = (uint64_t)ra | ((uint64_t)nb << 4) |
+                             ((uint64_t)(uint16_t)(int16_t)c_imm << 8) |
+                             ((uint64_t)(uint32_t)disp << 32);
+                x64_emit1(F, OP_TYPE_X64_STORE_MEM_DISP_IMM, (int64_t)v);
+            } else {
+                uint8_t rv = val_reg_or_load(F, val, R11, nb > 4 ? 1 : 0);
+                uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
+                if (disp == 0) store_mem(F, ra, rv, nb);
+                else           store_mem_disp(F, ra, rv, nb, disp);
+            }
         }
         return;
     }
@@ -2166,6 +2183,11 @@ static bool x64_op_regs(MLIR_Context *ctx, MLIR_OpHandle op,
         *reads = (uint16_t)((1u << (v & 15)) | (1u << ((v >> 4) & 15)));
         return true;
     }
+    case OP_TYPE_X64_STORE_MEM_DISP_IMM: {
+        uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+        *reads = (uint16_t)(1u << (v & 15));
+        return true;
+    }
     case OP_TYPE_X64_LOAD_MEM_SIB:
     case OP_TYPE_X64_LEA_SIB: {
         uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
@@ -2694,6 +2716,7 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                         tk == OP_TYPE_X64_RET || tk == OP_TYPE_X64_CALL_SYM || tk == OP_TYPE_X64_CALL_REG ||
                         tk == OP_TYPE_X64_JTAB_DISPATCH || tk == OP_TYPE_X64_LEA_RBP ||
                         tk == OP_TYPE_X64_STORE_MEM || tk == OP_TYPE_X64_STORE_MEM_DISP ||
+                        tk == OP_TYPE_X64_STORE_MEM_DISP_IMM ||
                         tk == OP_TYPE_X64_STORE_MEM_SIB || tk == OP_TYPE_X64_STORE_MEM_SIB_IMM8 ||
                         tk == OP_TYPE_X64_ALU_MR_SIB || tk == OP_TYPE_X64_STORE_RBP_SIZED ||
                         tk == OP_TYPE_X64_PUSH_R || tk == OP_TYPE_X64_POP_R ||
@@ -2724,6 +2747,28 @@ static void x64_optimize_block(MLIR_Context *ctx, MLIR_BlockHandle blk) {
                     uint16_t kr = 0, kw = 0;
                     if (!x64_op_regs(ctx, opk, &kr, &kw) || (kw & (uint16_t)(1u << r0)))
                         break;
+                }
+            }
+
+            // 0j. Load-into-copy folding:
+            //     load_mem*(d0, ...) ; mov_rr(d1, d0, w) (d0 dead after mov) -> load_mem*(d1, ...)
+            //     Unlocks `cmpb/cmpw/cmpl $imm, disp(%base)` fusion when loads pass through a copy!
+            if ((t0 == OP_TYPE_X64_LOAD_MEM || t0 == OP_TYPE_X64_LOAD_MEM_DISP || t0 == OP_TYPE_X64_LOAD_MEM_SIB) &&
+                t1 == OP_TYPE_X64_MOV_RR) {
+                uint64_t v0 = (uint64_t)MLIR_GetOpInlineI64(ctx, op0);
+                uint64_t v1 = (uint64_t)MLIR_GetOpInlineI64(ctx, op1);
+                uint8_t d0 = (uint8_t)(v0 & 15);
+                int nb  = (t0 == OP_TYPE_X64_LOAD_MEM_SIB) ? (int)((v0 >> 16) & 15) : (int)((v0 >> 8) & 15);
+                int sgn = (t0 == OP_TYPE_X64_LOAD_MEM_SIB) ? (int)((v0 >> 20) & 1)  : (int)((v0 >> 12) & 1);
+                uint8_t d1 = (uint8_t)(v1 & 15), s1 = (uint8_t)((v1 >> 4) & 15);
+                int w1 = (int)((v1 >> 8) & 1);
+                bool ext_ok = (w1 == 1) || (!sgn && nb <= 4);
+                if (s1 == d0 && ext_ok && (d1 == d0 || x64_reg_dead_after(ctx, blk, j + 1, n_ops, d0))) {
+                    uint64_t nv0 = (v0 & ~15ull) | (uint64_t)d1;
+                    MLIR_RewriteVoidInlineI64(ctx, op0, t0, (int64_t)nv0);
+                    MLIR_RewriteVoidInlineI64(ctx, op1, OP_TYPE_X64_NOP, 0);
+                    changed = true;
+                    continue;
                 }
             }
 
@@ -4084,6 +4129,28 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
             store_mem_disp(F, (uint8_t)(v & 15), (uint8_t)((v >> 4) & 15),
                            (int)((v >> 8) & 15), (int32_t)(uint32_t)(v >> 32));
+            break;
+        }
+        case OP_TYPE_X64_STORE_MEM_DISP_IMM: {
+            uint64_t v = (uint64_t)MLIR_GetOpInlineI64(ctx, op);
+            uint8_t base = (uint8_t)(v & 15);
+            int nb = (int)((v >> 4) & 15);
+            int16_t imm16 = (int16_t)(uint16_t)((v >> 8) & 0xffffu);
+            int32_t disp = (int32_t)(uint32_t)(v >> 32);
+            if (nb == 1) {
+                rex(F, 0, 0, 0, base); eb(F, 0xC6); modrm_mem_disp(F, 0, base, disp);
+                eb(F, (uint8_t)imm16);
+            } else if (nb == 2) {
+                eb(F, 0x66); rex(F, 0, 0, 0, base); eb(F, 0xC7); modrm_mem_disp(F, 0, base, disp);
+                uint16_t u16 = (uint16_t)imm16;
+                eb(F, (uint8_t)(u16 & 0xff)); eb(F, (uint8_t)(u16 >> 8));
+            } else if (nb == 4) {
+                rex(F, 0, 0, 0, base); eb(F, 0xC7); modrm_mem_disp(F, 0, base, disp);
+                e32(F, (uint32_t)(int32_t)imm16);
+            } else {
+                rex(F, 1, 0, 0, base); eb(F, 0xC7); modrm_mem_disp(F, 0, base, disp);
+                e32(F, (uint32_t)(int32_t)imm16);
+            }
             break;
         }
         case OP_TYPE_X64_LOAD_MEM_SIB: {
