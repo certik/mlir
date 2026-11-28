@@ -1524,6 +1524,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     bool is_dispatch_loop = false;
     if (hdr_in && n_calls_tot > 0) {
         size_t n_call_blks = 0;
+        uint32_t max_hdr_in = 0;
         bool has_cold_loop_call = false;
         for (size_t b = 0; b < n_blocks; b++) {
             if (call_off[b] < call_off[b + 1]) {
@@ -1531,11 +1532,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 if (loop_depth && loop_depth[b] > 0 && hdr_in[b] == 0)
                     has_cold_loop_call = true;
             }
+            if (hdr_in[b] > max_hdr_in) max_hdr_in = hdr_in[b];
             if (hdr_in[b] >= 8u) is_dispatch_loop = true;
         }
         if (!is_dispatch_loop && has_cold_loop_call && n_calls_tot <= 24u && n_blocks >= 8u)
             is_dispatch_loop = true;
-        if (n_call_blks * 4u > n_blocks) is_dispatch_loop = false;
+        size_t call_blk_lim = (max_hdr_in >= 32u) ? (n_blocks / 2u) : (n_blocks / 4u);
+        if (n_call_blks > call_blk_lim) is_dispatch_loop = false;
     }
 
     for (uint32_t k = 0; k < nv; k++) {
