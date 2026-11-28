@@ -62,6 +62,7 @@ SOURCES = [
     "mlir_llvm_load_cse.c",
     "mlir_llvm_arith_gvn.c",
     "mlir_llvm_dce.c",
+    "mlir_llvm_opt.c",
     "mlir_regalloc.c",
     "mlir_llvm_to_aarch64.c",
     "mlir_aarch64_asm.c",
