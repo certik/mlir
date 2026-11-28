@@ -1377,6 +1377,27 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             int32_t dmy = 0;
             if (sm_get(&F->gep_skip, r, &dmy)) return;
         }
+        int64_t const_off = 0;
+        if (x64_gep_const_offset(ctx, op, &const_off)) {
+            MLIR_ValueHandle base = MLIR_GetOpOperand(ctx, op, 0);
+            uint8_t rD;
+            bool has_rD = val_in_reg(F, r, &rD);
+            uint8_t dst = has_rD ? rD : RAX;
+            int32_t aoff;
+            if (alloca_slot(F, base, &aoff)) {
+                lea_rbp(F, dst, aoff - (int32_t)const_off);
+            } else {
+                uint8_t rb = val_reg_or_load(F, base, RAX, 1);
+                if (const_off == 0) {
+                    if (dst != rb) mov_rr(F, dst, rb, 1);
+                } else {
+                    x64_emit1(F, OP_TYPE_X64_LEA_MEM_DISP,
+                              (int64_t)dst | ((int64_t)rb << 4) | ((int64_t)(uint32_t)(int32_t)const_off << 32));
+                }
+            }
+            if (!has_rD) store_val_w(F, r, dst, 1);
+            return;
+        }
         MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
         MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
         if (!eta || !ria) { fail(F, "getelementptr missing elem_type/indices", (string){0}); return; }
@@ -4869,7 +4890,6 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             // blocks with 0 successor operands and >= 5 dense cases (span <= 512, density >= 50%).
             if (jbh_k && fused_icmp != MLIR_INVALID_HANDLE && !fused_invert &&
                 MLIR_GetOpType(ctx, term) == OP_TYPE_LLVM_COND_BR &&
-                MLIR_GetOpNumSuccessorOperands(ctx, term, 0) == 0 &&
                 MLIR_GetOpNumSuccessorOperands(ctx, term, 1) == 0) {
                 MLIR_AttributeHandle pa0 = MLIR_GetOpAttr(ctx, fused_icmp, MLIR_KEY_PREDICATE);
                 int64_t pred0 = pa0 ? MLIR_GetAttributeInteger(ctx, pa0) : -1;
@@ -4882,9 +4902,10 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                     else if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a0), &c0)) sw_val = a1;
                     int sw_ib = (sw_val != MLIR_INVALID_HANDLE) ? int_bits(ctx, sw_val) : 0;
                     if (sw_ib == 32 || sw_ib == 64) {
-                        int64_t case_vals[512];
-                        int     case_tgts[512];
-                        int     chain_blks[512];
+                        int64_t       case_vals[512];
+                        int           case_tgts[512];
+                        MLIR_OpHandle case_edge_op[512];
+                        int           chain_blks[512];
                         size_t  n_cases = 0, n_chain = 0;
                         // Lookup true/false succ indices of head block
                         int t0 = -1, f0 = -1;
@@ -4895,7 +4916,9 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                         s = (fk0 * 1099511628211ull) & jbh_mask;
                         while (jbh_k[s]) { if (jbh_k[s] == fk0) { f0 = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
                         if (t0 >= 0 && f0 >= 0) {
-                            case_vals[0] = c0; case_tgts[0] = t0; n_cases = 1;
+                            case_vals[0] = c0; case_tgts[0] = t0;
+                            case_edge_op[0] = (MLIR_GetOpNumSuccessorOperands(ctx, term, 0) > 0) ? term : MLIR_INVALID_HANDLE;
+                            n_cases = 1;
                             int cur_bi = f0;
                             while (cur_bi >= 0 && (size_t)cur_bi != b && n_cases < 512 &&
                                    pred_cnt[cur_bi] == 1 && !skip_blk[cur_bi]) {
@@ -4909,7 +4932,6 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                                 if (cno < 2) break;
                                 MLIR_OpHandle cterm = MLIR_GetBlockOp(ctx, cbk, cno - 1);
                                 if (MLIR_GetOpType(ctx, cterm) != OP_TYPE_LLVM_COND_BR ||
-                                    MLIR_GetOpNumSuccessorOperands(ctx, cterm, 0) != 0 ||
                                     MLIR_GetOpNumSuccessorOperands(ctx, cterm, 1) != 0) break;
                                 MLIR_ValueHandle ccond = MLIR_GetOpOperand(ctx, cterm, 0);
                                 MLIR_OpHandle cicmp = MLIR_INVALID_HANDLE;
@@ -4947,6 +4969,7 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                                 chain_blks[n_chain++] = cur_bi;
                                 case_vals[n_cases] = cv;
                                 case_tgts[n_cases] = ct;
+                                case_edge_op[n_cases] = (MLIR_GetOpNumSuccessorOperands(ctx, cterm, 0) > 0) ? cterm : MLIR_INVALID_HANDLE;
                                 n_cases++;
                                 cur_bi = cf;
                             }
@@ -4976,10 +4999,21 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                                         jt->span = (uint32_t)span64;
                                         jt->targets = (int *)malloc(span64 * sizeof(int));
                                         uint8_t *filled = (uint8_t *)calloc(span64, 1);
+                                        int case_tramp[512];
                                         for (uint32_t k = 0; k < jt->span; k++) jt->targets[k] = cur_bi;
                                         for (size_t ci = 0; ci < n_cases; ci++) {
+                                            case_tramp[ci] = -1;
                                             uint32_t idx = (uint32_t)((uint64_t)case_vals[ci] - (uint64_t)min_c);
-                                            if (!filled[idx]) { jt->targets[idx] = case_tgts[ci]; filled[idx] = 1; }
+                                            if (!filled[idx]) {
+                                                if (case_edge_op[ci] != MLIR_INVALID_HANDLE) {
+                                                    int tr = F.x64_next_label++;
+                                                    case_tramp[ci] = tr;
+                                                    jt->targets[idx] = tr;
+                                                } else {
+                                                    jt->targets[idx] = case_tgts[ci];
+                                                }
+                                                filled[idx] = 1;
+                                            }
                                         }
                                         free(filled);
                                         int w = (sw_ib > 32) ? 1 : 0;
@@ -4997,6 +5031,13 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                                         alu_ri(&F, 7 /*cmp*/, RAX, (int32_t)(jt->span - 1), w);
                                         x64_emit1(&F, OP_TYPE_X64_JCC, (int64_t)CC_A | ((int64_t)cur_bi << 32));
                                         x64_emit1(&F, OP_TYPE_X64_JTAB_DISPATCH, (int64_t)jid);
+                                        for (size_t ci = 0; ci < n_cases; ci++) {
+                                            if (case_tramp[ci] >= 0) {
+                                                x64_emit1(&F, OP_TYPE_X64_LABEL, (int64_t)case_tramp[ci]);
+                                                emit_edge(&F, case_edge_op[ci], 0, MLIR_GetOpSuccessor(ctx, case_edge_op[ci], 0));
+                                                x64_emit1(&F, OP_TYPE_X64_JMP, (int64_t)case_tgts[ci]);
+                                            }
+                                        }
                                         emitted_jtab = true;
                                     }
                                 }
