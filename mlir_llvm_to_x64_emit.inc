@@ -2767,6 +2767,20 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             add_fix(F, lbl, fld);
             break;
         }
+        case OP_TYPE_X64_JTAB_DISPATCH: {
+            size_t jid = (size_t)MLIR_GetOpInlineI64(ctx, op);
+            // lea rcx, [rip + disp32]
+            eb(F, 0x48); eb(F, 0x8D); eb(F, 0x0D);
+            uint32_t fld = here(F); e32(F, 0);
+            if (jid < F->n_jtabs) F->jtabs[jid].lea_disp_off = fld;
+            // movsxd rdx, DWORD PTR [rcx + rax*4]
+            eb(F, 0x48); eb(F, 0x63); eb(F, 0x14); eb(F, 0x81);
+            // add rcx, rdx
+            eb(F, 0x48); eb(F, 0x01); eb(F, 0xD1);
+            // jmp rcx
+            eb(F, 0xFF); eb(F, 0xE1);
+            break;
+        }
         case OP_TYPE_X64_CALL_SYM: {
             string sym = MLIR_GetAttributeString(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_SYM_NAME));
             eb(F, 0xE8); uint32_t fld = here(F); e32(F, 0);
@@ -2887,6 +2901,20 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         uint32_t fld = F->fix[i].field_off;
         int32_t rel = (int32_t)g_lbl_off[tb] - (int32_t)(fld + 4);
         buf_patch_le32(&F->f->code, fld, (uint32_t)rel);
+    }
+
+    // Emit PC-relative 32-bit jump tables in .text after function code.
+    for (size_t j = 0; j < F->n_jtabs; j++) {
+        X64JTab *jt = &F->jtabs[j];
+        while (F->f->code.len & 3) eb(F, 0xCC);
+        uint32_t jtab_off = here(F);
+        int32_t disp = (int32_t)jtab_off - (int32_t)(jt->lea_disp_off + 4);
+        buf_patch_le32(&F->f->code, jt->lea_disp_off, (uint32_t)disp);
+        for (uint32_t k = 0; k < jt->span; k++) {
+            int tb = jt->targets[k];
+            int32_t rel = (int32_t)g_lbl_off[tb] - (int32_t)jtab_off;
+            e32(F, (uint32_t)rel);
+        }
     }
 }
 
@@ -3429,8 +3457,49 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         }
     }
 
+    // Precompute block predecessor counts & block-handle->index map for dense
+    // switch jump-table detection at -O1/-O2.
+    uint32_t *pred_cnt = NULL;
+    uint8_t  *skip_blk = NULL;
+    uintptr_t *jbh_k = NULL;
+    int32_t   *jbh_v = NULL;
+    size_t jbh_mask = 0;
+    if (g_x64_opt_level >= 1 && !F.fast_ra && nb >= 7) {
+        size_t jbh_cap = 16;
+        while (jbh_cap < nb * 2) jbh_cap *= 2;
+        jbh_k = (uintptr_t *)calloc(jbh_cap, sizeof(uintptr_t));
+        jbh_v = (int32_t   *)malloc(jbh_cap * sizeof(int32_t));
+        pred_cnt = (uint32_t *)calloc(nb, sizeof(uint32_t));
+        skip_blk = (uint8_t  *)calloc(nb, 1);
+        if (jbh_k && jbh_v && pred_cnt && skip_blk) {
+            jbh_mask = jbh_cap - 1;
+            for (size_t b = 0; b < nb; b++) {
+                uintptr_t k = (uintptr_t)MLIR_GetRegionBlock(ctx, reg, b);
+                size_t s = (k * 1099511628211ull) & jbh_mask;
+                while (jbh_k[s]) s = (s + 1) & jbh_mask;
+                jbh_k[s] = k; jbh_v[s] = (int32_t)b;
+            }
+            for (size_t b = 0; b < nb; b++) {
+                MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+                size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                if (no == 0) continue;
+                MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                for (size_t si = 0; si < ns; si++) {
+                    uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, si);
+                    size_t s = (sk * 1099511628211ull) & jbh_mask;
+                    while (jbh_k[s]) {
+                        if (jbh_k[s] == sk) { pred_cnt[jbh_v[s]]++; break; }
+                        s = (s + 1) & jbh_mask;
+                    }
+                }
+            }
+        }
+    }
+
     // --- emit blocks ---
     for (size_t b = 0; b < nb && F.ok; b++) {
+        if (skip_blk && skip_blk[b]) continue;
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         MLIR_BlockHandle next_bk = (b + 1 < nb) ? MLIR_GetRegionBlock(ctx, reg, b + 1) : MLIR_INVALID_HANDLE;
         x64_emit1(&F, OP_TYPE_X64_LABEL, (int64_t)b);
@@ -3570,12 +3639,157 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             lower_op(&F, MLIR_GetBlockOp(ctx, bk, i), refs);
         if (no > 0 && F.ok) {
             MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
-            if (fused_icmp != MLIR_INVALID_HANDLE)
-                emit_fused_cond_br(&F, reg, term, next_bk, fused_icmp, fused_invert);
-            else
-                lower_term(&F, reg, term, next_bk);
+            bool emitted_jtab = false;
+            // Dense switch jump-table detection:
+            // Recognize a chain of single-predecessor `icmp eq(sw_val, c_i) -> cond_br`
+            // blocks with 0 successor operands and >= 5 dense cases (span <= 512, density >= 50%).
+            if (jbh_k && fused_icmp != MLIR_INVALID_HANDLE && !fused_invert &&
+                MLIR_GetOpType(ctx, term) == OP_TYPE_LLVM_COND_BR &&
+                MLIR_GetOpNumSuccessorOperands(ctx, term, 0) == 0 &&
+                MLIR_GetOpNumSuccessorOperands(ctx, term, 1) == 0) {
+                MLIR_AttributeHandle pa0 = MLIR_GetOpAttr(ctx, fused_icmp, MLIR_KEY_PREDICATE);
+                int64_t pred0 = pa0 ? MLIR_GetAttributeInteger(ctx, pa0) : -1;
+                if (pred0 == 0) { // eq
+                    MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, fused_icmp, 0);
+                    MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, fused_icmp, 1);
+                    MLIR_ValueHandle sw_val = MLIR_INVALID_HANDLE;
+                    int64_t c0 = 0;
+                    if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a1), &c0)) sw_val = a0;
+                    else if (is_const(ctx, MLIR_GetValueDefiningOp(ctx, a0), &c0)) sw_val = a1;
+                    int sw_ib = (sw_val != MLIR_INVALID_HANDLE) ? int_bits(ctx, sw_val) : 0;
+                    if (sw_ib == 32 || sw_ib == 64) {
+                        int64_t case_vals[512];
+                        int     case_tgts[512];
+                        int     chain_blks[512];
+                        size_t  n_cases = 0, n_chain = 0;
+                        // Lookup true/false succ indices of head block
+                        int t0 = -1, f0 = -1;
+                        uintptr_t tk0 = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, 0);
+                        size_t s = (tk0 * 1099511628211ull) & jbh_mask;
+                        while (jbh_k[s]) { if (jbh_k[s] == tk0) { t0 = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
+                        uintptr_t fk0 = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, 1);
+                        s = (fk0 * 1099511628211ull) & jbh_mask;
+                        while (jbh_k[s]) { if (jbh_k[s] == fk0) { f0 = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
+                        if (t0 >= 0 && f0 >= 0) {
+                            case_vals[0] = c0; case_tgts[0] = t0; n_cases = 1;
+                            int cur_bi = f0;
+                            while (cur_bi >= 0 && (size_t)cur_bi != b && n_cases < 512 &&
+                                   pred_cnt[cur_bi] == 1 && !skip_blk[cur_bi]) {
+                                // Prevent cycles in chain
+                                bool seen_c = false;
+                                for (size_t q = 0; q < n_chain; q++) if (chain_blks[q] == cur_bi) { seen_c = true; break; }
+                                if (seen_c) break;
+                                MLIR_BlockHandle cbk = MLIR_GetRegionBlock(ctx, reg, (size_t)cur_bi);
+                                if (MLIR_GetBlockNumArgs(ctx, cbk) != 0) break;
+                                size_t cno = MLIR_GetBlockNumOps(ctx, cbk);
+                                if (cno < 2) break;
+                                MLIR_OpHandle cterm = MLIR_GetBlockOp(ctx, cbk, cno - 1);
+                                if (MLIR_GetOpType(ctx, cterm) != OP_TYPE_LLVM_COND_BR ||
+                                    MLIR_GetOpNumSuccessorOperands(ctx, cterm, 0) != 0 ||
+                                    MLIR_GetOpNumSuccessorOperands(ctx, cterm, 1) != 0) break;
+                                MLIR_ValueHandle ccond = MLIR_GetOpOperand(ctx, cterm, 0);
+                                MLIR_OpHandle cicmp = MLIR_INVALID_HANDLE;
+                                bool ok_blk = true;
+                                for (size_t oi = 0; oi + 1 < cno; oi++) {
+                                    MLIR_OpHandle cop = MLIR_GetBlockOp(ctx, cbk, oi);
+                                    if (x64_op_rematerialized(ctx, cop)) continue;
+                                    if (cicmp == MLIR_INVALID_HANDLE &&
+                                        MLIR_GetOpType(ctx, cop) == OP_TYPE_LLVM_ICMP &&
+                                        MLIR_GetOpResult(ctx, cop, 0) == ccond &&
+                                        x64_val_dead_after_term(&F, ccond)) {
+                                        cicmp = cop;
+                                    } else {
+                                        ok_blk = false;
+                                        break;
+                                    }
+                                }
+                                if (!ok_blk || cicmp == MLIR_INVALID_HANDLE) break;
+                                MLIR_AttributeHandle cpa = MLIR_GetOpAttr(ctx, cicmp, MLIR_KEY_PREDICATE);
+                                if (!cpa || MLIR_GetAttributeInteger(ctx, cpa) != 0) break;
+                                MLIR_ValueHandle ca0 = MLIR_GetOpOperand(ctx, cicmp, 0);
+                                MLIR_ValueHandle ca1 = MLIR_GetOpOperand(ctx, cicmp, 1);
+                                int64_t cv = 0;
+                                if (ca0 == sw_val && is_const(ctx, MLIR_GetValueDefiningOp(ctx, ca1), &cv)) {}
+                                else if (ca1 == sw_val && is_const(ctx, MLIR_GetValueDefiningOp(ctx, ca0), &cv)) {}
+                                else break;
+                                int ct = -1, cf = -1;
+                                uintptr_t ctk = (uintptr_t)MLIR_GetOpSuccessor(ctx, cterm, 0);
+                                s = (ctk * 1099511628211ull) & jbh_mask;
+                                while (jbh_k[s]) { if (jbh_k[s] == ctk) { ct = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
+                                uintptr_t cfk = (uintptr_t)MLIR_GetOpSuccessor(ctx, cterm, 1);
+                                s = (cfk * 1099511628211ull) & jbh_mask;
+                                while (jbh_k[s]) { if (jbh_k[s] == cfk) { cf = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
+                                if (ct < 0 || cf < 0) break;
+                                chain_blks[n_chain++] = cur_bi;
+                                case_vals[n_cases] = cv;
+                                case_tgts[n_cases] = ct;
+                                n_cases++;
+                                cur_bi = cf;
+                            }
+                            if (n_cases >= 5 && cur_bi >= 0) {
+                                int64_t min_c = case_vals[0], max_c = case_vals[0];
+                                for (size_t ci = 1; ci < n_cases; ci++) {
+                                    if (case_vals[ci] < min_c) min_c = case_vals[ci];
+                                    if (case_vals[ci] > max_c) max_c = case_vals[ci];
+                                }
+                                uint64_t span64 = (uint64_t)max_c - (uint64_t)min_c + 1u;
+                                if (span64 >= 5 && span64 <= 512 && (uint64_t)n_cases * 2u >= span64) {
+                                    // Ensure all chain blocks are > b (not already emitted!).
+                                    bool all_after = true;
+                                    for (size_t q = 0; q < n_chain; q++)
+                                        if ((size_t)chain_blks[q] <= b) { all_after = false; break; }
+                                    if (all_after) {
+                                        for (size_t q = 0; q < n_chain; q++)
+                                            skip_blk[chain_blks[q]] = 1;
+                                        if (F.n_jtabs == F.c_jtabs) {
+                                            size_t nc = F.c_jtabs ? F.c_jtabs * 2 : 4;
+                                            F.jtabs = (X64JTab *)realloc(F.jtabs, nc * sizeof(X64JTab));
+                                            F.c_jtabs = nc;
+                                        }
+                                        size_t jid = F.n_jtabs++;
+                                        X64JTab *jt = &F.jtabs[jid];
+                                        jt->lea_disp_off = 0;
+                                        jt->span = (uint32_t)span64;
+                                        jt->targets = (int *)malloc(span64 * sizeof(int));
+                                        uint8_t *filled = (uint8_t *)calloc(span64, 1);
+                                        for (uint32_t k = 0; k < jt->span; k++) jt->targets[k] = cur_bi;
+                                        for (size_t ci = 0; ci < n_cases; ci++) {
+                                            uint32_t idx = (uint32_t)((uint64_t)case_vals[ci] - (uint64_t)min_c);
+                                            if (!filled[idx]) { jt->targets[idx] = case_tgts[ci]; filled[idx] = 1; }
+                                        }
+                                        free(filled);
+                                        int w = (sw_ib > 32) ? 1 : 0;
+                                        load_val_w(&F, sw_val, RAX, w);
+                                        if (min_c != 0) {
+                                            if (w == 0) {
+                                                alu_ri(&F, 5 /*sub*/, RAX, (int32_t)min_c, 0);
+                                            } else if (min_c >= INT32_MIN && min_c <= INT32_MAX) {
+                                                alu_ri(&F, 5 /*sub*/, RAX, (int32_t)min_c, 1);
+                                            } else {
+                                                mov_ri(&F, RCX, min_c, 1);
+                                                alu_rr(&F, 0x29 /*sub*/, RAX, RCX, 1);
+                                            }
+                                        }
+                                        alu_ri(&F, 7 /*cmp*/, RAX, (int32_t)(jt->span - 1), w);
+                                        x64_emit1(&F, OP_TYPE_X64_JCC, (int64_t)CC_A | ((int64_t)cur_bi << 32));
+                                        x64_emit1(&F, OP_TYPE_X64_JTAB_DISPATCH, (int64_t)jid);
+                                        emitted_jtab = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!emitted_jtab) {
+                if (fused_icmp != MLIR_INVALID_HANDLE)
+                    emit_fused_cond_br(&F, reg, term, next_bk, fused_icmp, fused_invert);
+                else
+                    lower_term(&F, reg, term, next_bk);
+            }
         }
     }
+    free(jbh_k); free(jbh_v); free(pred_cnt); free(skip_blk);
 
     // --- x64.* MLIR dialect peephole optimization pass (-O1/-O2) ---
     if (F.ok && g_x64_opt_level >= 1)
@@ -3590,6 +3804,8 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
     if (!F.ok) g_x64_ok = false;
     g_x64_ok = g_x64_ok && F.ok;
 
+    for (size_t j = 0; j < F.n_jtabs; j++) free(F.jtabs[j].targets);
+    free(F.jtabs);
     vmap_free(&F.slots);
     if (g_x64_times) g_x64_times->isel_encode_ns += x64_clock() - t_isel;
 }
