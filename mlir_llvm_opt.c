@@ -708,14 +708,19 @@ static void inl_devirt_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             if (MLIR_GetOpAttr(ctx, op, MLIR_KEY_CALLEE) != MLIR_INVALID_HANDLE ||
                 MLIR_GetOpAttr(ctx, op, MLIR_KEY_CALLEE_NAME) != MLIR_INVALID_HANDLE)
                 continue;
-            if (MLIR_GetOpAttr(ctx, op, MLIR_KEY_VAR_CALLEE_TYPE) != MLIR_INVALID_HANDLE)
-                continue;
+            MLIR_AttributeHandle vct = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VAR_CALLEE_TYPE);
+            if (vct != MLIR_INVALID_HANDLE) {
+                MLIR_TypeHandle ft = MLIR_GetAttributeTypeValue(ctx, vct);
+                if (ft != MLIR_INVALID_HANDLE && MLIR_GetTypeFunctionIsVarArg(ctx, ft))
+                    continue;
+            }
             size_t nop = MLIR_GetOpNumOperands(ctx, op);
             if (nop < 1 || nop > 16) continue;
             MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 0));
             if (def == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, def) != OP_TYPE_LLVM_MLIR_ADDRESSOF)
                 continue;
             MLIR_AttributeHandle gname = MLIR_GetOpAttr(ctx, def, MLIR_KEY_GLOBAL_NAME);
+            if (gname == MLIR_INVALID_HANDLE) gname = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
             if (gname == MLIR_INVALID_HANDLE) continue;
             MLIR_ValueHandle args[16];
             for (size_t k = 1; k < nop; k++) args[k - 1] = MLIR_GetOpOperand(ctx, op, k);
