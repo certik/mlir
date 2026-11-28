@@ -271,6 +271,12 @@ typedef struct {
 } BrFix;
 
 typedef struct {
+    uint32_t lea_disp_off; // offset of rel32 in `lea rcx, [rip + disp32]`
+    uint32_t span;         // number of table entries
+    int     *targets;      // target block index for each entry [0..span-1]
+} X64JTab;
+
+typedef struct {
     MLIR_Context *ctx;
     ObjFunc      *f;
     VMap          slots;     // value -> rbp-relative byte offset (positive = below rbp)
@@ -301,6 +307,7 @@ typedef struct {
     uint8_t       cs_reg[8]; // those registers, in save order
     // intra-function branch fixups (used by x64_encode_block)
     BrFix        *fix; size_t n_fix, c_fix;
+    X64JTab      *jtabs; size_t n_jtabs, c_jtabs;
     uint32_t      n_fixed;   // # of fixed (named) params, for llvm.intr.vastart
     bool          ok;
     // x64.* MLIR dialect lowering state: non-NULL during llvm.* -> x64.* isel,
