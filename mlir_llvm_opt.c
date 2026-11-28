@@ -868,8 +868,39 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     bool only_devirt = false;
     if (has_call) {
         if (nb > 8 || total_ops > 50) {
-            if (has_indirect_call && nb <= 28 && total_ops <= 160) only_devirt = true;
-            else return false;
+            if (has_indirect_call && nb <= 28 && total_ops <= 160) {
+                only_devirt = true;
+            } else if (nb <= 20 && total_ops <= 140) {
+                // Fast-path early-return callee (e.g. CoreMark calc_func):
+                // entry block ends in cond_br where one successor is a small
+                // call-free return block (<= 8 ops).
+                MLIR_BlockHandle e0 = MLIR_GetRegionBlock(ctx, reg, 0);
+                size_t e0n = MLIR_GetBlockNumOps(ctx, e0);
+                bool has_fast_ret = false;
+                if (e0n > 0) {
+                    MLIR_OpHandle et = MLIR_GetBlockOp(ctx, e0, e0n - 1);
+                    if (MLIR_GetOpType(ctx, et) == OP_TYPE_LLVM_COND_BR) {
+                        for (size_t si = 0; si < 2; si++) {
+                            MLIR_BlockHandle sb = MLIR_GetOpSuccessor(ctx, et, si);
+                            size_t sno = MLIR_GetBlockNumOps(ctx, sb);
+                            if (sno > 0 && sno <= 8) {
+                                MLIR_OpType st = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, sb, sno - 1));
+                                if (st == OP_TYPE_LLVM_RETURN || st == OP_TYPE_FUNC_RETURN) {
+                                    bool sc = false;
+                                    for (size_t k = 0; k < sno; k++) {
+                                        MLIR_OpType kt = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, sb, k));
+                                        if (kt == OP_TYPE_LLVM_CALL || kt == OP_TYPE_FUNC_CALL) { sc = true; break; }
+                                    }
+                                    if (!sc) { has_fast_ret = true; break; }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!has_fast_ret) return false;
+            } else {
+                return false;
+            }
         }
     } else {
         if (nb > 14 || total_ops > 100) return false;
@@ -1671,6 +1702,85 @@ static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         }
         free(mhk); free(mhv); free(mpc);
         if (!merged) break;
+    }
+
+    // Hot-fallthrough RPO layout for small/medium loop functions where an exit/return
+    // block sits strictly before a loop backedge (e.g. CoreMark core_state_transition).
+    nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    if (nb >= 4 && nb <= 64) {
+        MLIR_BlockHandle blks[64];
+        uint8_t is_ret[64];
+        size_t max_latch = 0;
+        bool has_ret_in_loop = false;
+        bool has_switch = false;
+        for (size_t b = 0; b < nb; b++) {
+            blks[b] = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, blks[b]);
+            is_ret[b] = 0;
+            if (no == 0) continue;
+            MLIR_OpHandle t = MLIR_GetBlockOp(ctx, blks[b], no - 1);
+            MLIR_OpType tt = MLIR_GetOpType(ctx, t);
+            if (tt == OP_TYPE_LLVM_RETURN || tt == OP_TYPE_FUNC_RETURN) {
+                is_ret[b] = 1;
+            } else {
+                if (tt == OP_TYPE_LLVM_SWITCH) has_switch = true;
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
+                for (size_t si = 0; si < ns; si++) {
+                    size_t ti = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, t, si));
+                    if (ti <= b && b > max_latch) max_latch = b;
+                }
+            }
+        }
+        for (size_t b = 1; b < max_latch; b++) {
+            if (is_ret[b]) { has_ret_in_loop = true; break; }
+        }
+        if (has_ret_in_loop && has_switch) {
+            uint8_t vis[64];
+            memset(vis, 0, nb);
+            size_t post[64], n_post = 0;
+            size_t st_b[64], st_si[64], sp = 0;
+            vis[0] = 1;
+            st_b[0] = 0; st_si[0] = 0; sp = 1;
+            while (sp > 0) {
+                size_t cur = st_b[sp - 1];
+                MLIR_OpHandle t = MLIR_GetBlockTerminator(ctx, blks[cur]);
+                size_t ns = (t != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, t) : 0;
+                // Build ordered successor list: put is_ret successors FIRST so in post-order
+                // they finish FIRST -> in RPO they are placed LAST (at the end of the function)!
+                size_t ord[64];
+                size_t nord = 0;
+                for (size_t pass = 0; pass < 2; pass++) {
+                    for (size_t si = 0; si < ns && nord < 64; si++) {
+                        size_t ti = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, t, si));
+                        if (ti >= nb) continue;
+                        if ((is_ret[ti] != 0) == (pass == 0)) ord[nord++] = ti;
+                    }
+                }
+                bool pushed = false;
+                while (st_si[sp - 1] < nord) {
+                    size_t nxt = ord[st_si[sp - 1]++];
+                    if (!vis[nxt]) {
+                        vis[nxt] = 1;
+                        st_b[sp] = nxt; st_si[sp] = 0; sp++;
+                        pushed = true;
+                        break;
+                    }
+                }
+                if (!pushed) {
+                    post[n_post++] = cur;
+                    sp--;
+                }
+            }
+            // Reverse post-order -> RPO (entry block 0 is post[n_post - 1]).
+            MLIR_BlockHandle rpo[64];
+            size_t n_rpo = 0;
+            for (size_t i = n_post; i-- > 0; ) {
+                if (post[i] != 0) rpo[n_rpo++] = blks[post[i]];
+            }
+            if (n_rpo > 0) {
+                MLIR_MoveBlocksToRegionEnd(ctx, rpo, n_rpo, reg);
+            }
+        }
     }
 }
 
