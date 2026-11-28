@@ -1565,6 +1565,12 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         uint32_t lu = last_use[vi];
         if (lu <= fp) continue;
         bool callee_only = crosses[vi];
+        if (T->remat_alloca) {
+            MLIR_OpHandle dop = MLIR_GetValueDefiningOp(ctx, handle[vi]);
+            if (dop != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, dop) == OP_TYPE_LLVM_MLIR_ADDRESSOF &&
+                (callee_only || weight[vi] < 20ull))
+                continue;
+        }
         if (has_hints && hint_src[vi] >= 0) {
             int32_t vV = hint_src[vi];
             for (size_t a = 0; a < nact; a++) {
