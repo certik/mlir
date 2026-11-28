@@ -1463,6 +1463,12 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint8_t  act_pk[RA_MAXPOOL];
     size_t nact = 0;
     uint32_t busy_mask = 0;
+    // Block-local hole-filling state: tracks block-local values temporarily
+    // borrowing a register `pk` whose global owner `gv` is dead throughout block `vb`.
+    uint32_t hole_end[RA_MAXPOOL];
+    uint8_t  hole_pk[RA_MAXPOOL];
+    size_t   nhole = 0;
+    uint32_t hole_busy_mask = 0;
     uint32_t pool_mask = (T->npool >= 32) ? 0xFFFFFFFFu : ((1u << T->npool) - 1u);
     uint32_t caller_mask = (T->ncaller >= 32) ? 0xFFFFFFFFu : ((1u << T->ncaller) - 1u);
     uint32_t callee_mask = pool_mask & ~caller_mask;
@@ -1491,6 +1497,14 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 act_vi[a] = act_vi[nact]; act_end[a] = act_end[nact]; act_pk[a] = act_pk[nact];
             } else a++;
         }
+        // Retire hole-filled block-local intervals whose end < fp.
+        for (size_t h = 0; h < nhole; ) {
+            if (hole_end[h] < fp) {
+                hole_busy_mask &= ~(1u << hole_pk[h]);
+                nhole--;
+                hole_end[h] = hole_end[nhole]; hole_pk[h] = hole_pk[nhole];
+            } else h++;
+        }
         // Dead-on-def / never-used values keep their slot.
         uint32_t lu = last_use[vi];
         if (lu <= fp) continue;
@@ -1501,6 +1515,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 if (act_vi[a] != (uint32_t)vV) continue;
                 if (act_end[a] != fp) break;   // not a clean death
                 if (callee_only && act_pk[a] < T->ncaller) break; // reg class
+                if (hole_busy_mask & (1u << act_pk[a])) break;
                 uint8_t pk = act_pk[a];
                 home_pk[vi] = (int8_t)pk;        // inherit V's physical register
                 act_vi[a] = vi; act_end[a] = lu; // ownership transfers; reg stays busy
@@ -1508,7 +1523,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             }
             if (home_pk[vi] >= 0) continue;
         }
-        uint32_t avail = (~busy_mask) & (callee_only ? callee_mask : pool_mask);
+        uint32_t avail = (~(busy_mask | hole_busy_mask)) & (callee_only ? callee_mask : pool_mask);
         if (avail) {
             uint32_t found = ra_ctz64((uint64_t)avail);
             busy_mask |= (1u << found);
@@ -1519,6 +1534,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         size_t evict_a = (size_t)-1; uint64_t best_w = 0; uint32_t best_end = 0;
         for (size_t a = 0; a < nact; a++) {
             if (callee_only && act_pk[a] < T->ncaller) continue;
+            if (hole_busy_mask & (1u << act_pk[a])) continue;
             uint64_t aw = weight[act_vi[a]]; uint32_t ae = act_end[a];
             if (evict_a == (size_t)-1 || aw < best_w || (aw == best_w && ae > best_end)) {
                 evict_a = a; best_w = aw; best_end = ae;
@@ -1529,14 +1545,55 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             home_pk[act_vi[evict_a]] = -1;          // evicted -> slot
             act_vi[evict_a] = vi; act_end[evict_a] = lu; // reuse its register
             home_pk[vi] = (int8_t)act_pk[evict_a];
-        } else if (callee_only && T->call_save_mask && !env->linear_crosses && caller_mask) {
+        } else if (bw_g) {
+            // Live-range hole-filling (after eviction fails): if `vi` lives strictly
+            // inside a small contiguous block span [b0..b1] (block-local or <= 12-block
+            // opcode-local global) and an active global `gv` in `act_vi[a]` is provably
+            // dead in EVERY block b in [b0..b1], borrow `gv`'s register without evicting `gv`!
+            uint32_t b0 = def_blk[vi], b1 = b0;
+            bool span_ok = (glob_id[vi] == UINT32_MAX);
+            if (!span_ok) {
+                // Find [b0..b1] covering [fp..lu] (first_pos/last_use already cover all
+                // live_in/live_out blocks of `vi`).
+                uint32_t fp_op = halfopen ? (fp / 2u) : fp;
+                uint32_t lu_op = halfopen ? (lu / 2u) : lu;
+                while (b0 > 0 && block_first[b0] > fp_op) b0--;
+                while (b1 + 1 < n_blocks && block_last[b1] < lu_op && (b1 - b0) <= 12u) b1++;
+                if (block_first[b0] <= fp_op && block_last[b1] >= lu_op && (b1 - b0) <= 12u)
+                    span_ok = true;
+            }
+            if (span_ok) {
+                for (size_t a = 0; a < nact; a++) {
+                    uint8_t pk = act_pk[a];
+                    if (callee_only && pk < T->ncaller) continue;
+                    if (hole_busy_mask & (1u << pk)) continue;
+                    uint32_t gv = act_vi[a];
+                    uint32_t g = glob_id[gv];
+                    if (g == UINT32_MAX) continue;
+                    if (def_blk[gv] >= b0 && def_blk[gv] <= b1) continue;
+                    bool dead_all = true;
+                    for (uint32_t bb = b0; bb <= b1; bb++) {
+                        if (a64_bs_test(live_in + (size_t)bb * bw_g, g) ||
+                            a64_bs_test(live_out + (size_t)bb * bw_g, g)) {
+                            dead_all = false; break;
+                        }
+                    }
+                    if (!dead_all) continue;
+                    hole_busy_mask |= (1u << pk);
+                    hole_end[nhole] = lu; hole_pk[nhole] = pk; nhole++;
+                    home_pk[vi] = (int8_t)pk;
+                    break;
+                }
+            }
+        }
+        if (home_pk[vi] < 0 && callee_only && T->call_save_mask && !env->linear_crosses && caller_mask) {
             // Callee-saved regs are full with higher-weight values. If keeping `vi`
             // in a caller-saved reg and saving/restoring only around crossed calls is
             // cheaper than spilling on every use, allocate from caller_mask.
             uint64_t vi_cost = is_dispatch_loop ? (call_cross_w[vi] / 16ull) : (call_cross_w[vi] * 2ull);
             if (weight[vi] > vi_cost) {
                 uint64_t vi_eff = weight[vi] - vi_cost;
-                uint32_t cavail = (~busy_mask) & caller_mask;
+                uint32_t cavail = (~(busy_mask | hole_busy_mask)) & caller_mask;
                 if (cavail) {
                     uint32_t found = ra_ctz64((uint64_t)cavail);
                     busy_mask |= (1u << found);
@@ -1546,6 +1603,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     size_t cevict = (size_t)-1; uint64_t cbest_w = 0; uint32_t cbest_end = 0;
                     for (size_t a = 0; a < nact; a++) {
                         if (act_pk[a] >= T->ncaller) continue;
+                        if (hole_busy_mask & (1u << act_pk[a])) continue;
                         uint32_t av = act_vi[a];
                         uint64_t ac = crosses[av] ? (is_dispatch_loop ? (call_cross_w[av] / 16ull) : (call_cross_w[av] * 2ull)) : 0ull;
                         uint64_t aw = weight[av] > ac ? (weight[av] - ac) : 0ull;
