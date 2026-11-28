@@ -134,6 +134,7 @@ typedef struct IR_U32Map {
 #define OPF_HAS_EXTRA    2u  // has regions or successors (in op_extra_map or first_result)
 #define OPF_HAS_AUX      4u  // has rare printer/parser aux (in ctx->op_aux_map)
 #define OPF_INLINE_EXTRA 8u  // n_results == 0: op_extra index stored inline in first_result
+#define OPF_INLINE_I64   16u // n_operands == 0 && n_results == 0: 64-bit payload inline in first_operand/first_result
 
 // 32-byte compact op record (exact half cache line — 2 ops per 64-byte line).
 typedef struct IR_Op {
@@ -1675,6 +1676,245 @@ MLIR_OpHandle MLIR_BuildVoidBinary(MLIR_Builder *b, MLIR_OpType t,
     link_operand_tracked(rec, vals, u0, VAL_IDX(ctx, x, "MLIR_BuildVoidBinary"), op);
     link_operand_tracked(rec, vals, u0 + 1, VAL_IDX(ctx, y, "MLIR_BuildVoidBinary"), op | (1u << OPND_IDX_SHIFT));
     return OP_H(ctx, op);
+}
+
+static MLIR_NAT_NOINLINE MLIR_OpHandle build_void_slow(MLIR_Builder *b, MLIR_OpType t) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    return MLIR_BuildOp(b, &s);
+}
+
+MLIR_OpHandle MLIR_BuildVoid(MLIR_Builder *b, MLIR_OpType t) {
+    API_CHECK(b != NULL && b->ctx != NULL, "MLIR_BuildVoid", "NULL argument");
+    MLIR_Context *ctx = b->ctx;
+    API_CHECK(t != OP_TYPE_UNREGISTERED && (uint32_t)t < ctx->op_types.n_types && (uint32_t)t < 0xffffu,
+              "MLIR_BuildVoid", "not an op type of this context");
+    uint32_t op = ctx->ops.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildVoid");
+    if (MLIR_NAT_UNLIKELY(op >= ctx->ops.cap || bi == 0 || b->before != MLIR_INVALID_HANDLE))
+        return build_void_slow(b, t);
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops))
+        return build_void_slow(b, t);
+    ctx->ops.n = op + 1;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = 0;
+    o->n_attributes = 0;
+    o->n_operands = 0;
+    o->n_results = 0;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = 0;
+    o->first_result = 0;
+    o->first_attr = 0;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildVoid");
+    return OP_H(ctx, op);
+}
+
+static MLIR_NAT_NOINLINE MLIR_OpHandle build_void_attr_slow(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return MLIR_BuildOp(b, &s);
+}
+
+MLIR_OpHandle MLIR_BuildVoidAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    API_CHECK(b != NULL && b->ctx != NULL, "MLIR_BuildVoidAttr", "NULL argument");
+    MLIR_Context *ctx = b->ctx;
+    API_CHECK(t != OP_TYPE_UNREGISTERED && (uint32_t)t < ctx->op_types.n_types && (uint32_t)t < 0xffffu,
+              "MLIR_BuildVoidAttr", "not an op type of this context");
+    API_CHECK(key != MLIR_KEY_INVALID && key < ctx->keys.n_keys && val != MLIR_INVALID_HANDLE,
+              "MLIR_BuildVoidAttr", "bad attribute key or value");
+    uint32_t op = ctx->ops.n;
+    uint32_t fa = ctx->extra.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildVoidAttr");
+    if (MLIR_NAT_UNLIKELY(op >= ctx->ops.cap || fa + 2 > ctx->extra.cap ||
+                          bi == 0 || b->before != MLIR_INVALID_HANDLE))
+        return build_void_attr_slow(b, t, key, val);
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops))
+        return build_void_attr_slow(b, t, key, val);
+    ctx->ops.n = op + 1;
+    ctx->extra.n = fa + 2;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = 0;
+    o->n_attributes = 1;
+    o->n_operands = 0;
+    o->n_results = 0;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = 0;
+    o->first_result = 0;
+    o->first_attr = fa;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildVoidAttr");
+    uint32_t *pa = EXTRA(ctx) + fa;
+    pa[0] = key;
+    pa[1] = ATTR_IDX(ctx, val, "MLIR_BuildVoidAttr");
+    return OP_H(ctx, op);
+}
+
+static MLIR_NAT_NOINLINE MLIR_OpHandle build_void_2attr_slow(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_NamedAttr a[2] = { MLIR_Named(k0, v0), MLIR_Named(k1, v1) };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return MLIR_BuildOp(b, &s);
+}
+
+MLIR_OpHandle MLIR_BuildVoid2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    API_CHECK(b != NULL && b->ctx != NULL, "MLIR_BuildVoid2Attr", "NULL argument");
+    MLIR_Context *ctx = b->ctx;
+    API_CHECK(t != OP_TYPE_UNREGISTERED && (uint32_t)t < ctx->op_types.n_types && (uint32_t)t < 0xffffu,
+              "MLIR_BuildVoid2Attr", "not an op type of this context");
+    API_CHECK(k0 != MLIR_KEY_INVALID && k0 < ctx->keys.n_keys && v0 != MLIR_INVALID_HANDLE &&
+              k1 != MLIR_KEY_INVALID && k1 < ctx->keys.n_keys && v1 != MLIR_INVALID_HANDLE,
+              "MLIR_BuildVoid2Attr", "bad attribute key or value");
+    uint32_t op = ctx->ops.n;
+    uint32_t fa = ctx->extra.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildVoid2Attr");
+    if (MLIR_NAT_UNLIKELY(op >= ctx->ops.cap || fa + 4 > ctx->extra.cap ||
+                          bi == 0 || b->before != MLIR_INVALID_HANDLE))
+        return build_void_2attr_slow(b, t, k0, v0, k1, v1);
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops))
+        return build_void_2attr_slow(b, t, k0, v0, k1, v1);
+    ctx->ops.n = op + 1;
+    ctx->extra.n = fa + 4;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = 0;
+    o->n_attributes = 2;
+    o->n_operands = 0;
+    o->n_results = 0;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = 0;
+    o->first_result = 0;
+    o->first_attr = fa;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildVoid2Attr");
+    uint32_t *pa = EXTRA(ctx) + fa;
+    pa[0] = k0;
+    pa[1] = ATTR_IDX(ctx, v0, "MLIR_BuildVoid2Attr");
+    pa[2] = k1;
+    pa[3] = ATTR_IDX(ctx, v1, "MLIR_BuildVoid2Attr");
+    return OP_H(ctx, op);
+}
+
+static MLIR_NAT_NOINLINE MLIR_OpHandle build_void_inline_i64_slow(MLIR_Builder *b, MLIR_OpType t, int64_t val) {
+    MLIR_Context *ctx = b->ctx;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildVoidInlineI64");
+    uint32_t op = vec_push(&ctx->ops, 1);
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = OPF_INLINE_I64;
+    o->n_attributes = 0;
+    o->n_operands = 0;
+    o->n_results = 0;
+    o->parent_block = bi;
+    o->first_operand = (uint32_t)(uint64_t)val;
+    o->first_result = (uint32_t)((uint64_t)val >> 32);
+    o->first_attr = 0;
+    o->location = LOC_IDX(ctx, b->loc, "MLIR_BuildVoidInlineI64");
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    if (blk->n_ops >= blk->cap_ops) {
+        uint32_t ncap = blk->cap_ops ? blk->cap_ops * 2 : 16;
+        uint32_t *nb = (uint32_t *)arena_alloc(ctx->arena ? ctx->arena : ctx->persistent,
+                                               (size_t)ncap * sizeof(uint32_t));
+        if (blk->n_ops) memcpy(nb, blk->ops, (size_t)blk->n_ops * sizeof(uint32_t));
+        blk->ops = nb;
+        blk->cap_ops = ncap;
+    }
+    uint32_t pos = blk->n_ops++;
+    blk->ops[pos] = op;
+    o->block_pos = pos;
+    return OP_H(ctx, op);
+}
+
+MLIR_OpHandle MLIR_BuildVoidInlineI64(MLIR_Builder *b, MLIR_OpType t, int64_t val) {
+    MLIR_Context *ctx = b->ctx;
+    uint32_t op = ctx->ops.n;
+    uint32_t bi = BLOCK_IDX(ctx, b->block, "MLIR_BuildVoidInlineI64");
+    if (MLIR_NAT_UNLIKELY(op >= ctx->ops.cap || bi == 0 || b->before != MLIR_INVALID_HANDLE))
+        return build_void_inline_i64_slow(b, t, val);
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    uint32_t pos = blk->n_ops;
+    if (MLIR_NAT_UNLIKELY(pos >= blk->cap_ops))
+        return build_void_inline_i64_slow(b, t, val);
+    ctx->ops.n = op + 1;
+    blk->ops[pos] = op;
+    blk->n_ops = pos + 1;
+    IR_Op *o = &OPS(ctx)[op];
+    o->op_type = (uint16_t)t;
+    o->flags = OPF_INLINE_I64;
+    o->n_attributes = 0;
+    o->n_operands = 0;
+    o->n_results = 0;
+    o->parent_block = bi;
+    o->block_pos = pos;
+    o->first_operand = (uint32_t)(uint64_t)val;
+    o->first_result = (uint32_t)((uint64_t)val >> 32);
+    o->first_attr = 0;
+    o->location = 0;
+    return OP_H(ctx, op);
+}
+
+bool MLIR_OpHasInlineI64(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    const IR_Op *o = &OPS(ctx)[OP_IDX(ctx, oh, "MLIR_OpHasInlineI64")];
+    return (o->flags & OPF_INLINE_I64) != 0;
+}
+
+int64_t MLIR_GetOpInlineI64(MLIR_Context *ctx, MLIR_OpHandle oh) {
+    const IR_Op *o = &OPS(ctx)[OP_IDX(ctx, oh, "MLIR_GetOpInlineI64")];
+    return (int64_t)((uint64_t)o->first_operand | ((uint64_t)o->first_result << 32));
+}
+
+void MLIR_ReserveBlockOps(MLIR_Context *ctx, MLIR_BlockHandle bh, size_t cap) {
+    uint32_t bi = BLOCK_IDX(ctx, bh, "MLIR_ReserveBlockOps");
+    IR_Block *blk = &BLOCKS(ctx)[bi];
+    if (cap <= blk->cap_ops) return;
+    uint32_t ncap = (uint32_t)cap;
+    uint32_t *nb = (uint32_t *)arena_alloc(ctx->arena ? ctx->arena : ctx->persistent,
+                                           (size_t)ncap * sizeof(uint32_t));
+    if (blk->n_ops) memcpy(nb, blk->ops, (size_t)blk->n_ops * sizeof(uint32_t));
+    blk->ops = nb;
+    blk->cap_ops = ncap;
+}
+
+void MLIR_ReserveOps(MLIR_Context *ctx, size_t extra_ops) {
+    if (!ctx || extra_ops == 0) return;
+    size_t need = (size_t)ctx->ops.n + extra_ops;
+    if (need > ctx->ops.cap) vec_reserve(&ctx->ops, need);
+}
+
+uint32_t MLIR_GetOpCheckpoint(MLIR_Context *ctx) {
+    return ctx ? ctx->ops.n : 0;
+}
+
+void MLIR_ResetBlockToCheckpoint(MLIR_Context *ctx, MLIR_BlockHandle bh, uint32_t op_checkpoint) {
+    if (!ctx) return;
+    uint32_t bi = BLOCK_IDX(ctx, bh, "MLIR_ResetBlockToCheckpoint");
+    BLOCKS(ctx)[bi].n_ops = 0;
+    if (op_checkpoint <= ctx->ops.n) ctx->ops.n = op_checkpoint;
 }
 
 static MLIR_NAT_NOINLINE MLIR_ValueHandle build_nullary_attr_slow(MLIR_Builder *b, MLIR_OpType t,

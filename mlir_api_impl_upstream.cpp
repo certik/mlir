@@ -835,6 +835,62 @@ extern "C" MLIR_OpHandle MLIR_BuildVoidBinary(MLIR_Builder *b, MLIR_OpType t,
     return MLIR_BuildOp(b, &s);
 }
 
+extern "C" MLIR_OpHandle MLIR_BuildVoid(MLIR_Builder *b, MLIR_OpType t) {
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    return MLIR_BuildOp(b, &s);
+}
+
+extern "C" MLIR_OpHandle MLIR_BuildVoidAttr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey key, MLIR_AttributeHandle val) {
+    MLIR_NamedAttr a = MLIR_Named(key, val);
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.attrs = &a;
+    s.n_attrs = 1;
+    return MLIR_BuildOp(b, &s);
+}
+
+extern "C" MLIR_OpHandle MLIR_BuildVoid2Attr(MLIR_Builder *b, MLIR_OpType t,
+        MLIR_AttrKey k0, MLIR_AttributeHandle v0,
+        MLIR_AttrKey k1, MLIR_AttributeHandle v1) {
+    MLIR_NamedAttr a[2] = { MLIR_Named(k0, v0), MLIR_Named(k1, v1) };
+    MLIR_OpSpec s = { OP_TYPE_UNREGISTERED };
+    s.type = t;
+    s.attrs = a;
+    s.n_attrs = 2;
+    return MLIR_BuildOp(b, &s);
+}
+
+extern "C" MLIR_OpHandle MLIR_BuildVoidInlineI64(MLIR_Builder *b, MLIR_OpType t, int64_t val) {
+    MLIR_TypeHandle i64 = MLIR_CreateTypeInteger(b->ctx, 64, false);
+    return MLIR_BuildVoidAttr(b, t, MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(b->ctx, val, i64));
+}
+
+extern "C" bool MLIR_OpHasInlineI64(MLIR_Context *ctx, MLIR_OpHandle op) {
+    return MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE) != MLIR_INVALID_HANDLE;
+}
+
+extern "C" int64_t MLIR_GetOpInlineI64(MLIR_Context *ctx, MLIR_OpHandle op) {
+    return MLIR_GetAttributeInteger(ctx, MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE));
+}
+
+extern "C" void MLIR_ReserveBlockOps(MLIR_Context *ctx, MLIR_BlockHandle block, size_t cap) {
+    (void)ctx; (void)block; (void)cap;
+}
+
+extern "C" void MLIR_ReserveOps(MLIR_Context *ctx, size_t extra_ops) {
+    (void)ctx; (void)extra_ops;
+}
+
+extern "C" uint32_t MLIR_GetOpCheckpoint(MLIR_Context *ctx) {
+    (void)ctx; return 0;
+}
+
+extern "C" void MLIR_ResetBlockToCheckpoint(MLIR_Context *ctx, MLIR_BlockHandle block, uint32_t op_checkpoint) {
+    (void)ctx; (void)block; (void)op_checkpoint;
+}
+
 extern "C" MLIR_ValueHandle MLIR_BuildNullaryAttr(MLIR_Builder *b, MLIR_OpType t,
         MLIR_TypeHandle rt, MLIR_AttrKey key, MLIR_AttributeHandle val) {
     MLIR_NamedAttr a = MLIR_Named(key, val);

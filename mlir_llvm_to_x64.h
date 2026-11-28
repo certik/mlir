@@ -42,6 +42,11 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
 bool mlir_llvm_to_x64_code(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
                            uint8_t **out_data, size_t *out_size);
 
+// Lower a flat `llvm`-dialect module to an `x64.*` target-dialect MLIR module
+// (for `--emit=x64-mlir` inspection and testing). Returns MLIR_INVALID_HANDLE
+// on failure.
+MLIR_OpHandle mlir_llvm_to_x64_mlir(MLIR_Context *ctx, MLIR_OpHandle llvm_module);
+
 // Optional phase timing (`tinyc --time-stages`). While `t` is non-NULL, every
 // mlir_llvm_to_elf / mlir_llvm_to_x64_code call ADDS the wall time (ns) of its
 // phases into *t. NULL (the default) disables timing; the only cost is then a

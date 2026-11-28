@@ -297,13 +297,37 @@ typedef struct {
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area
     int           n_cs;      // # of callee-saved regs to save/restore
     uint8_t       cs_reg[8]; // those registers, in save order
-    // block layout
-    uint32_t     *block_off; // code offset of each block (filled as emitted)
-    size_t        n_blocks;
+    // intra-function branch fixups (used by x64_encode_block)
     BrFix        *fix; size_t n_fix, c_fix;
     uint32_t      n_fixed;   // # of fixed (named) params, for llvm.intr.vastart
     bool          ok;
+    // x64.* MLIR dialect lowering state: non-NULL during llvm.* -> x64.* isel,
+    // MLIR_INVALID_HANDLE during x64_encode_block (and synth_start/synth_thunk).
+    MLIR_BlockHandle x64_blk;
+    MLIR_Builder     x64_bd;
+    MLIR_TypeHandle  x64_i64;
+    int              x64_next_label;
 } FnCtx;
+
+static inline void x64_emit0(FnCtx *F, MLIR_OpType t) {
+    MLIR_BuildVoid(&F->x64_bd, t);
+}
+static inline void x64_emit1(FnCtx *F, MLIR_OpType t, int64_t v) {
+    MLIR_BuildVoidInlineI64(&F->x64_bd, t, v);
+}
+static inline void x64_emit2i(FnCtx *F, MLIR_OpType t, int64_t v, int64_t imm) {
+    MLIR_BuildVoid2Attr(&F->x64_bd, t,
+                        MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(F->ctx, v, F->x64_i64),
+                        MLIR_KEY_IMM,   MLIR_CreateAttributeInteger(F->ctx, imm, F->x64_i64));
+}
+static inline void x64_emit1s(FnCtx *F, MLIR_OpType t, string sym) {
+    MLIR_BuildVoidAttr(&F->x64_bd, t, MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(F->ctx, sym));
+}
+static inline void x64_emit2s(FnCtx *F, MLIR_OpType t, int64_t v, string sym) {
+    MLIR_BuildVoid2Attr(&F->x64_bd, t,
+                        MLIR_KEY_VALUE,    MLIR_CreateAttributeInteger(F->ctx, v, F->x64_i64),
+                        MLIR_KEY_SYM_NAME, MLIR_CreateAttributeString(F->ctx, sym));
+}
 
 // Register pool for the x86_64 backend. Arg registers (rcx/rdx/rsi/rdi/r8/r9)
 // and the implicit-clobber registers (rdx by mul/div, rcx by shifts) are kept
@@ -347,6 +371,15 @@ static inline void modrm(FnCtx *F, int mod, int reg, int rm) {
 
 // mov reg, imm  (w=1 -> full 64-bit immediate via movabs)
 static void mov_ri(FnCtx *F, uint8_t reg, int64_t imm, int w) {
+    if (F->x64_blk) {
+        if (!w || (imm >= INT32_MIN && imm <= INT32_MAX)) {
+            x64_emit1(F, OP_TYPE_X64_MOV_RI32,
+                      (int64_t)reg | ((int64_t)w << 8) | ((int64_t)(uint32_t)(int32_t)imm << 32));
+        } else {
+            x64_emit2i(F, OP_TYPE_X64_MOV_RI, (int64_t)reg | ((int64_t)w << 8), imm);
+        }
+        return;
+    }
     if (imm == 0) {
         // xor reg32, reg32 (2-3 bytes, zero-extends to 64 bits)
         uint8_t rv = (uint8_t)(0x40 | ((reg >= 8) << 2) | (reg >= 8));
@@ -373,6 +406,11 @@ static void mov_ri(FnCtx *F, uint8_t reg, int64_t imm, int w) {
 }
 // generic ALU r/m64-or-32, r : opcode form (dst = dst OP src)
 static inline void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_ALU_RR,
+                  (int64_t)dst | ((int64_t)src << 4) | ((int64_t)w << 8) | ((int64_t)op << 12));
+        return;
+    }
     Buf *b = &F->f->code;
     if (b->len + 3 > b->cap) buf_grow(b, 3);
     uint8_t *p = b->data + b->len;
@@ -384,6 +422,11 @@ static inline void alu_rr(FnCtx *F, uint8_t op, uint8_t dst, uint8_t src, int w)
 }
 // ALU r/m64-or-32, imm8/imm32 (ext: 0=add, 1=or, 4=and, 5=sub, 6=xor, 7=cmp)
 static inline void alu_ri(FnCtx *F, uint8_t ext, uint8_t dst, int32_t imm, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_ALU_RI,
+                  (int64_t)dst | ((int64_t)ext << 4) | ((int64_t)w << 8) | ((int64_t)(uint32_t)imm << 32));
+        return;
+    }
     Buf *b = &F->f->code;
     if (b->len + 7 > b->cap) buf_grow(b, 7);
     uint8_t *p = b->data + b->len;
@@ -404,16 +447,32 @@ static inline void alu_ri(FnCtx *F, uint8_t ext, uint8_t dst, int32_t imm, int w
     b->len = (size_t)(p - b->data);
 }
 static inline void mov_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
-    if (dst == src) return;
+    if (dst == src && w) return;
+    if (dst == src && !w) return;
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_MOV_RR,
+                  (int64_t)dst | ((int64_t)src << 4) | ((int64_t)w << 8));
+        return;
+    }
     alu_rr(F, 0x89, dst, src, w);
 }
 static void imul_rr(FnCtx *F, uint8_t dst, uint8_t src, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_IMUL_RR,
+                  (int64_t)dst | ((int64_t)src << 4) | ((int64_t)w << 8));
+        return;
+    }
     rex(F, w, dst, 0, src);
     eb(F, 0x0F); eb(F, 0xAF);
     modrm(F, 3, dst, src);
 }
 // load reg, [rbp - off]
 static inline void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LOAD_RBP,
+                  (int64_t)reg | ((int64_t)w << 8) | ((int64_t)(uint32_t)off << 32));
+        return;
+    }
     Buf *b = &F->f->code;
     if (b->len + 7 > b->cap) buf_grow(b, 7);
     uint8_t *p = b->data + b->len;
@@ -435,6 +494,11 @@ static inline void load_rbp(FnCtx *F, uint8_t reg, int32_t off, int w) {
 }
 // store [rbp - off], reg
 static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_STORE_RBP,
+                  (int64_t)reg | ((int64_t)w << 8) | ((int64_t)(uint32_t)off << 32));
+        return;
+    }
     Buf *b = &F->f->code;
     if (b->len + 7 > b->cap) buf_grow(b, 7);
     uint8_t *p = b->data + b->len;
@@ -455,6 +519,11 @@ static inline void store_rbp(FnCtx *F, int32_t off, uint8_t reg, int w) {
     b->len = (size_t)(p - b->data);
 }
 static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LEA_RBP,
+                  (int64_t)reg | ((int64_t)(uint32_t)off << 32));
+        return;
+    }
     Buf *b = &F->f->code;
     if (b->len + 7 > b->cap) buf_grow(b, 7);
     uint8_t *p = b->data + b->len;
@@ -474,6 +543,11 @@ static inline void lea_rbp(FnCtx *F, uint8_t reg, int32_t off) {
     b->len = (size_t)(p - b->data);
 }
 static void load_rbp_sized(FnCtx *F, uint8_t dst, int32_t off, int bytes) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LOAD_RBP_SIZED,
+                  (int64_t)dst | ((int64_t)bytes << 4) | ((int64_t)(uint32_t)off << 32));
+        return;
+    }
     if (bytes == 8) { load_rbp(F, dst, off, 1); return; }
     if (bytes == 4) { load_rbp(F, dst, off, 0); return; }
     rex(F, 1, dst, 0, 0);
@@ -483,6 +557,11 @@ static void load_rbp_sized(FnCtx *F, uint8_t dst, int32_t off, int bytes) {
     else                       { modrm(F, 2, dst, RBP); e32(F, (uint32_t)d); }
 }
 static void store_rbp_sized(FnCtx *F, int32_t off, uint8_t src, int bytes) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_STORE_RBP_SIZED,
+                  (int64_t)src | ((int64_t)bytes << 4) | ((int64_t)(uint32_t)off << 32));
+        return;
+    }
     if (bytes == 8) { store_rbp(F, off, src, 1); return; }
     if (bytes == 4) { store_rbp(F, off, src, 0); return; }
     if (bytes == 2) { eb(F, 0x66); rex(F, 0, src, 0, 0); eb(F, 0x89); }
@@ -531,11 +610,20 @@ static void add_text_reloc(FnCtx *F, uint32_t field, string sym) {
 
 // lea reg, [rip + disp32]  (records a data reloc onto the global at `data_off`)
 static void lea_rip_data(FnCtx *F, uint8_t reg, int64_t data_off) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LEA_RIP_DATA,
+                  (int64_t)reg | ((int64_t)(uint32_t)data_off << 32));
+        return;
+    }
     uint32_t field = lea_rip_emit(F, reg);
     obj_add_reloc(F->f, field, field + 4, true, NULL, data_off);
 }
 // lea reg, [rip + disp32]  (PC-relative to a function symbol in the text section)
 static void lea_rip_func(FnCtx *F, uint8_t reg, string sym) {
+    if (F->x64_blk) {
+        x64_emit2s(F, OP_TYPE_X64_LEA_RIP_FUNC, (int64_t)reg, sym);
+        return;
+    }
     uint32_t field = lea_rip_emit(F, reg);
     add_text_reloc(F, field, sym);
 }
@@ -547,6 +635,11 @@ static inline void modrm_mem0(FnCtx *F, uint8_t reg, uint8_t addr) {
 }
 // width-aware memory load/store through an address already in `addr`
 static void load_mem(FnCtx *F, uint8_t dst, uint8_t addr, int bytes, bool sgn) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LOAD_MEM,
+                  (int64_t)dst | ((int64_t)addr << 4) | ((int64_t)bytes << 8) | ((int64_t)(sgn ? 1 : 0) << 12));
+        return;
+    }
     if (bytes == 8) { rex(F,1,dst,0,addr); eb(F,0x8B); modrm_mem0(F,dst,addr); }
     else if (bytes == 4) { rex(F,0,dst,0,addr); eb(F,0x8B); modrm_mem0(F,dst,addr);
                            if (sgn) { /* movsxd done by caller width */ } }
@@ -554,6 +647,11 @@ static void load_mem(FnCtx *F, uint8_t dst, uint8_t addr, int bytes, bool sgn) {
     else { rex(F,1,dst,0,addr); eb(F,0x0F); eb(F, sgn?0xBE:0xB6); modrm_mem0(F,dst,addr); }
 }
 static void store_mem(FnCtx *F, uint8_t addr, uint8_t src, int bytes) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_STORE_MEM,
+                  (int64_t)addr | ((int64_t)src << 4) | ((int64_t)bytes << 8));
+        return;
+    }
     if (bytes == 1) {
         if (src >= 4 && src < 8 && addr < 8) eb(F, 0x40);
         else rex(F,0,src,0,addr);
