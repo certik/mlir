@@ -415,7 +415,28 @@ static bool attr_name_eq(string s, const char *bare) {
     return true;
 }
 static void parse_attributes(P *p, AttrInfo *out) {
-    while (cur(p).kind == TC_TK_KW_ATTRIBUTE) {
+    while (cur(p).kind == TC_TK_KW_ATTRIBUTE ||
+           cur(p).kind == TC_TK_KW_DECLSPEC ||
+           cur(p).kind == TC_TK_KW_CALLCONV) {
+        if (cur(p).kind == TC_TK_KW_CALLCONV) {
+            // Win64 calling convention modifiers (__stdcall, __cdecl,
+            // __fastcall) are no-ops on x86_64.
+            p->i++;
+            continue;
+        }
+        if (cur(p).kind == TC_TK_KW_DECLSPEC) {
+            // MSVC `__declspec(dllimport)` / `__declspec(dllexport)` / etc.
+            p->i++;
+            if (!expect(p, TC_TK_LPAREN, str_lit("expected '(' after __declspec"))) return;
+            int depth = 1;
+            while (depth > 0 && cur(p).kind != TC_TK_EOF) {
+                if (cur(p).kind == TC_TK_LPAREN) depth++;
+                else if (cur(p).kind == TC_TK_RPAREN) { depth--; if (depth == 0) break; }
+                p->i++;
+            }
+            expect(p, TC_TK_RPAREN, str_lit("expected ')' after __declspec"));
+            continue;
+        }
         p->i++;
         // `__attribute__` must be followed by `((` and end with `))`.
         if (!expect(p, TC_TK_LPAREN, str_lit("expected '(' after __attribute__"))) return;
@@ -2841,6 +2862,15 @@ static StructDef *parse_struct_def(P *p) {
             } else if (cur(p).kind == TC_TK_COLON) {
                 // Anonymous bit-field: `unsigned : 0;` or `unsigned : 3;`
                 fn = (TcTok){0};
+                fn.line = cur(p).line;
+            } else if (ft.kind == TY_STRUCT && cur(p).kind == TC_TK_SEMI) {
+                // C11 anonymous struct/union member (e.g. LARGE_INTEGER in
+                // platform_windows.c): synthesize an internal field name so
+                // layout/sizing is preserved.
+                fn = (TcTok){0};
+                fn.kind = TC_TK_IDENT;
+                fn.text_str = "__anon_member";
+                fn.d.size = 13;
                 fn.line = cur(p).line;
             } else {
                 fn = cur(p);

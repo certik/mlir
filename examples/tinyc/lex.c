@@ -149,6 +149,7 @@ TcTokKind tinyc_keyword_or_ident(string s) {
         if (p[0] == 't' && memcmp(p, "typedef", 7) == 0) return TC_TK_KW_TYPEDEF;
         if (p[0] == 'd' && memcmp(p, "default", 7) == 0) return TC_TK_KW_DEFAULT;
         if (p[0] == 'v' && memcmp(p, "va_list", 7) == 0) return TC_TK_KW_VA_LIST;
+        if (p[0] == '_' && memcmp(p, "__cdecl", 7) == 0) return TC_TK_KW_CALLCONV;
         return TC_TK_IDENT;
     case 8:
         if (p[0] == 'c' && memcmp(p, "continue", 8) == 0) return TC_TK_KW_CONTINUE;
@@ -159,9 +160,14 @@ TcTokKind tinyc_keyword_or_ident(string s) {
         if (p[0] == '_' && memcmp(p, "_Alignof", 8) == 0) return TC_TK_KW_ALIGNOF;
         if (p[0] == '_' && memcmp(p, "_Generic", 8) == 0) return TC_TK_KW_GENERIC;
         return TC_TK_IDENT;
+    case 9:
+        if (p[0] == '_' && memcmp(p, "__stdcall", 9) == 0) return TC_TK_KW_CALLCONV;
+        return TC_TK_IDENT;
     case 10:
         if (p[0] == '_' && memcmp(p, "__restrict", 10) == 0) return TC_TK_KW_RESTRICT;
         if (p[0] == '_' && memcmp(p, "__volatile", 10) == 0) return TC_TK_KW_VOLATILE;
+        if (p[0] == '_' && memcmp(p, "__declspec", 10) == 0) return TC_TK_KW_DECLSPEC;
+        if (p[0] == '_' && memcmp(p, "__fastcall", 10) == 0) return TC_TK_KW_CALLCONV;
         return TC_TK_IDENT;
     case 12:
         if (p[0] == '_' && memcmp(p, "__restrict__", 12) == 0) return TC_TK_KW_RESTRICT;

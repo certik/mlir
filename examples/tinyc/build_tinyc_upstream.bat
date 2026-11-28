@@ -14,13 +14,13 @@ for %%f in ("%CONDA_PREFIX%\Library\lib\MLIR*.lib") do echo %%~nxf>>mlir_libs.rs
 set COREC_C=corec\base\io.c corec\base\buddy.c corec\base\arena.c corec\base\scratch.c corec\base\format.c corec\base\math.c corec\base\string.c corec\base\strbuf.c corec\base\mem.c corec\base\numconv.c corec\base\assert.c corec\base\exit.c
 set TINYC_C=examples\tinyc\lex.c examples\tinyc\preprocess.c examples\tinyc\parse.c examples\tinyc\emit.c examples\tinyc\driver.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_llvm_global_init.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasm_to_wasmstack.c mlir_wasmstack_to_wasmssa.c mlir_wasmssa_to_llvm.c mlir_llvm_mem2reg.c mlir_llvm_load_cse.c mlir_llvm_arith_gvn.c mlir_llvm_dce.c mlir_regalloc.c mlir_llvm_to_aarch64.c mlir_aarch64_asm.c mlir_aarch64_to_macho.c mlir_generic_printer.c mlir_lift_cf_to_scf.c
 
-cl /nologo /std:c11 /Zc:preprocessor /MD /DTINYC_HAS_UPSTREAM /I corec /I . /c %COREC_C% %TINYC_C% tests\upstream_main.c
+cl /nologo /O2 /std:c11 /Zc:preprocessor /MD /DTINYC_HAS_UPSTREAM /I corec /I . /c %COREC_C% %TINYC_C% tests\upstream_main.c
 if errorlevel 1 exit /b 1
 
-cl /nologo /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
+cl /nologo /O2 /Oi- /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
 if errorlevel 1 exit /b 1
 
-cl /nologo /std:c++17 /MD /EHsc /GR- /I corec /I . /I "%CONDA_PREFIX%\Library\include" /c mlir_api_impl_upstream.cpp
+cl /nologo /O2 /std:c++17 /MD /EHsc /GR- /I corec /I . /I "%CONDA_PREFIX%\Library\include" /c mlir_api_impl_upstream.cpp
 if errorlevel 1 exit /b 1
 
 link /nologo /out:tinyc.exe ^

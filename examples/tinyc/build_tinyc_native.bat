@@ -11,10 +11,10 @@ set COREC_C=corec\base\io.c corec\base\buddy.c corec\base\arena.c corec\base\scr
 set TINYC_C=examples\tinyc\lex.c examples\tinyc\preprocess.c examples\tinyc\parse.c examples\tinyc\emit.c examples\tinyc\driver.c
 set NATIVE_C=mlir_api_impl.c mlir_op_names.c mlir_lower_to_llvm.c mlir_translate_to_llvm_ir.c mlir_translate_to_wasm.c mlir_wasm_to_wat.c mlir_wasm_to_macho.c mlir_llvm_to_wasmssa.c mlir_llvm_global_init.c mlir_wasmssa_to_wasmstack.c mlir_wasmstack_to_bin.c mlir_wasm_link.c mlir_wasm_to_wasmstack.c mlir_wasmstack_to_wasmssa.c mlir_wasmssa_to_llvm.c mlir_llvm_mem2reg.c mlir_llvm_load_cse.c mlir_llvm_arith_gvn.c mlir_llvm_dce.c mlir_regalloc.c mlir_llvm_to_aarch64.c mlir_aarch64_asm.c mlir_aarch64_to_macho.c tokenizer.c mlir_parser.c op_parsers.c mlir_classic_printer.c mlir_generic_printer.c mlir_lift_cf_to_scf.c
 
-cl /nologo /std:c11 /Zc:preprocessor /MD /I corec /I . /c %COREC_C% %TINYC_C% %NATIVE_C% tests\upstream_main.c
+cl /nologo /O2 /std:c11 /Zc:preprocessor /MD /I corec /I . /c %COREC_C% %TINYC_C% %NATIVE_C% tests\upstream_main.c
 if errorlevel 1 exit /b 1
 
-cl /nologo /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
+cl /nologo /O2 /Oi- /std:c11 /Zc:preprocessor /MD /DPLATFORM_SKIP_ENTRY /I corec /I . /c corec\platform\platform_windows.c
 if errorlevel 1 exit /b 1
 
 link /nologo /out:tinyc_native.exe ^
