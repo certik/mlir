@@ -628,11 +628,17 @@ static void x64_val_home(FnCtx *F, MLIR_ValueHandle v, bool is_src,
     if (is_src && !F->fast_ra) {
         MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
         int64_t dummy;
-        if (def != MLIR_INVALID_HANDLE &&
-            (x64_is_remat_type(MLIR_GetOpType(F->ctx, def)) ||
-             MLIR_GetOpType(F->ctx, def) == OP_TYPE_LLVM_ALLOCA ||
-             is_const(F->ctx, def, &dummy)))
-            return;
+        if (def != MLIR_INVALID_HANDLE) {
+            MLIR_OpType dt = MLIR_GetOpType(F->ctx, def);
+            if ((x64_is_remat_type(dt) && dt != OP_TYPE_LLVM_MLIR_ADDRESSOF) ||
+                dt == OP_TYPE_LLVM_ALLOCA || is_const(F->ctx, def, &dummy))
+                return;
+            if (dt == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                uint8_t rH;
+                if (val_in_reg(F, v, &rH)) { *out_reg = (int)rH; return; }
+                return;
+            }
+        }
     }
     uint8_t xH;
     if (val_in_xmm(F, v, &xH)) { *out_reg = 16 + (int)xH; return; }
@@ -898,10 +904,27 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     MLIR_OpType ty = MLIR_GetOpType(ctx, op);
     switch (ty) {
     // value-less / rematerialized-at-use ops
-    case OP_TYPE_LLVM_MLIR_CONSTANT: case OP_TYPE_LLVM_MLIR_ADDRESSOF:
+    case OP_TYPE_LLVM_MLIR_CONSTANT:
     case OP_TYPE_LLVM_MLIR_UNDEF: case OP_TYPE_LLVM_MLIR_ZERO:
     case OP_TYPE_LLVM_MLIR_NULL:
         return;
+    case OP_TYPE_LLVM_MLIR_ADDRESSOF: {
+        uint8_t rD;
+        if (!F->fast_ra && val_in_reg(F, MLIR_GetOpResult(ctx, op, 0), &rD)) {
+            MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_NAME);
+            if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
+            string gn = strip_at(a ? MLIR_GetAttributeString(ctx, a) : (string){0});
+            if (!gn.size) { fail(F, "addressof missing symbol", (string){0}); return; }
+            uint32_t off;
+            if (gmap_get(F->gm, gn, &off) || x64_ensure_global_in_gmap(F, gn, &off))
+                lea_rip_data(F, rD, off);
+            else if (F->wasm_lifted && x64_is_wasm_data_sym(gn))
+                fail(F, "wasm global missing from data map", gn);
+            else
+                lea_rip_func(F, rD, gn);
+        }
+        return;
+    }
 
     // integer binops: dst = op0 OP op1
     case OP_TYPE_LLVM_ADD: case OP_TYPE_LLVM_SUB: case OP_TYPE_LLVM_AND:

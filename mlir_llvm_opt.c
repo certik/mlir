@@ -138,6 +138,19 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
     MLIR_BlockHandle *blks = (MLIR_BlockHandle *)malloc(nb * sizeof(MLIR_BlockHandle));
     for (size_t b = 0; b < nb; b++) blks[b] = MLIR_GetRegionBlock(ctx, reg, b);
 
+    // Block handle -> current 0..nb-1 index (MLIR_GetBlockIndex can be stale after MLIR_EraseBlock).
+    size_t bhcap = 16;
+    while (bhcap < nb * 2) bhcap *= 2;
+    uintptr_t *bhk = (uintptr_t *)calloc(bhcap, sizeof(uintptr_t));
+    size_t    *bhv = (size_t    *)malloc(bhcap * sizeof(size_t));
+    size_t bhmask = bhcap - 1;
+    for (size_t b = 0; b < nb; b++) {
+        uintptr_t k = (uintptr_t)blks[b];
+        size_t s = (k * 1099511628211ull) & bhmask;
+        while (bhk[s]) s = (s + 1) & bhmask;
+        bhk[s] = k; bhv[s] = b;
+    }
+
     // 1. Build predecessor lists (CSR format).
     size_t *pred_cnt = (size_t *)calloc(nb, sizeof(size_t));
     size_t total_edges = 0;
@@ -147,8 +160,12 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         MLIR_OpHandle t = MLIR_GetBlockOp(ctx, blks[b], no - 1);
         size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
         for (size_t s = 0; s < ns; s++) {
-            size_t ti = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, t, s));
-            if (ti < nb) { pred_cnt[ti]++; total_edges++; }
+            uintptr_t tk = (uintptr_t)MLIR_GetOpSuccessor(ctx, t, s);
+            size_t slot = (tk * 1099511628211ull) & bhmask;
+            while (bhk[slot]) {
+                if (bhk[slot] == tk) { pred_cnt[bhv[slot]]++; total_edges++; break; }
+                slot = (slot + 1) & bhmask;
+            }
         }
     }
     size_t *pred_off = (size_t *)malloc((nb + 1) * sizeof(size_t));
@@ -162,8 +179,16 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         MLIR_OpHandle t = MLIR_GetBlockOp(ctx, blks[b], no - 1);
         size_t ns = MLIR_GetOpNumSuccessors(ctx, t);
         for (size_t s = 0; s < ns; s++) {
-            size_t ti = MLIR_GetBlockIndex(ctx, MLIR_GetOpSuccessor(ctx, t, s));
-            if (ti < nb) preds[pred_off[ti] + pred_cnt[ti]++] = b;
+            uintptr_t tk = (uintptr_t)MLIR_GetOpSuccessor(ctx, t, s);
+            size_t slot = (tk * 1099511628211ull) & bhmask;
+            while (bhk[slot]) {
+                if (bhk[slot] == tk) {
+                    size_t ti = bhv[slot];
+                    preds[pred_off[ti] + pred_cnt[ti]++] = b;
+                    break;
+                }
+                slot = (slot + 1) & bhmask;
+            }
         }
     }
 
@@ -278,7 +303,9 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                 size_t i = 0;
                 while (i + 1 < MLIR_GetBlockNumOps(ctx, blks[b])) {
                     MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blks[b], i);
-                    if (!licm_is_hoistable(ctx, op)) { i++; continue; }
+                    bool is_hoist = licm_is_hoistable(ctx, op) ||
+                                    (nb <= 64 && MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_MLIR_ADDRESSOF);
+                    if (!is_hoist) { i++; continue; }
                     size_t nop = MLIR_GetOpNumOperands(ctx, op);
                     bool inv = true;
                     for (size_t k = 0; k < nop; k++) {
@@ -297,7 +324,13 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                         if (odef != MLIR_INVALID_HANDLE && licm_is_remat_const(ctx, odef)) {
                             MLIR_BlockHandle ob = MLIR_GetOpParentBlock(ctx, odef);
                             if (ob != MLIR_INVALID_HANDLE) {
-                                size_t obi = MLIR_GetBlockIndex(ctx, ob);
+                                uintptr_t obk = (uintptr_t)ob;
+                                size_t oslot = (obk * 1099511628211ull) & bhmask;
+                                size_t obi = nb;
+                                while (bhk[oslot]) {
+                                    if (bhk[oslot] == obk) { obi = bhv[oslot]; break; }
+                                    oslot = (oslot + 1) & bhmask;
+                                }
                                 if (obi < nb && in_loop_blk[obi]) {
                                     MLIR_DetachOp(ctx, odef);
                                     size_t ins_pos = MLIR_GetBlockNumOps(ctx, blks[pre]) - 1;
@@ -321,6 +354,89 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
         vset_free(&in_loop);
     }
 
+    // 4. Lightweight Dominator-Tree CSE for pure unary/binary ops + addressof (when nb <= 64).
+    //    Deduplicates identical pure ops in blocks dominated by an earlier identical op.
+    if (nb <= 256) {
+        typedef struct {
+            MLIR_OpType ty;
+            MLIR_TypeHandle rty;
+            MLIR_ValueHandle a0, a1;
+            int64_t extra; // predicate for icmp, or hash for addressof
+            string gname;
+            size_t def_blk;
+            MLIR_ValueHandle res;
+        } DomEnt;
+        size_t cap = 256, cnt = 0;
+        DomEnt *ents = (DomEnt *)malloc(cap * sizeof(DomEnt));
+        if (ents) {
+            for (size_t b = 0; b < nb; b++) {
+                MLIR_BlockHandle bk = blks[b];
+                size_t i = 0;
+                while (i < MLIR_GetBlockNumOps(ctx, bk)) {
+                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                    MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+                    bool ok = (ot == OP_TYPE_LLVM_SEXT || ot == OP_TYPE_LLVM_ZEXT || ot == OP_TYPE_LLVM_TRUNC ||
+                               ot == OP_TYPE_LLVM_ADD  || ot == OP_TYPE_LLVM_SUB  || ot == OP_TYPE_LLVM_MUL  ||
+                               ot == OP_TYPE_LLVM_AND  || ot == OP_TYPE_LLVM_OR   || ot == OP_TYPE_LLVM_XOR  ||
+                               ot == OP_TYPE_LLVM_SHL  || ot == OP_TYPE_LLVM_LSHR || ot == OP_TYPE_LLVM_ASHR ||
+                               (nb <= 64 && ot == OP_TYPE_LLVM_MLIR_ADDRESSOF));
+                    if (!ok || MLIR_GetOpNumResults(ctx, op) != 1) { i++; continue; }
+                    MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+                    MLIR_TypeHandle rty = MLIR_GetValueType(ctx, r);
+                    size_t nop = MLIR_GetOpNumOperands(ctx, op);
+                    MLIR_ValueHandle a0 = nop >= 1 ? MLIR_GetOpOperand(ctx, op, 0) : MLIR_INVALID_HANDLE;
+                    MLIR_ValueHandle a1 = nop >= 2 ? MLIR_GetOpOperand(ctx, op, 1) : MLIR_INVALID_HANDLE;
+                    if ((ot == OP_TYPE_LLVM_ADD || ot == OP_TYPE_LLVM_MUL ||
+                         ot == OP_TYPE_LLVM_AND || ot == OP_TYPE_LLVM_OR || ot == OP_TYPE_LLVM_XOR) &&
+                        (uintptr_t)a1 < (uintptr_t)a0) {
+                        MLIR_ValueHandle t = a0; a0 = a1; a1 = t;
+                    }
+                    string gn = {0};
+                    if (ot == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                        MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_GLOBAL_NAME);
+                        if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(ctx, op, MLIR_KEY_VALUE);
+                        if (a != MLIR_INVALID_HANDLE) gn = MLIR_GetAttributeString(ctx, a);
+                        if (!gn.size) { i++; continue; }
+                    }
+                    MLIR_ValueHandle hit = MLIR_INVALID_HANDLE;
+                    for (size_t e = 0; e < cnt; e++) {
+                        if (ents[e].ty != ot || ents[e].rty != rty) continue;
+                        if (ot == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                            if (ents[e].gname.size != gn.size ||
+                                memcmp(ents[e].gname.str, gn.str, gn.size) != 0) continue;
+                        } else {
+                            if (ents[e].a0 != a0 || ents[e].a1 != a1) continue;
+                        }
+                        size_t db = ents[e].def_blk;
+                        if (db == b || (dom[b * words + (db >> 6)] & (1ull << (db & 63)))) {
+                            hit = ents[e].res;
+                            break;
+                        }
+                    }
+                    if (hit != MLIR_INVALID_HANDLE) {
+                        MLIR_ReplaceAllUsesOfValue(ctx, r, hit);
+                        MLIR_DetachOp(ctx, op);
+                        continue;
+                    }
+                    if (cnt < 2048) {
+                        if (cnt == cap) {
+                            cap *= 2;
+                            ents = (DomEnt *)realloc(ents, cap * sizeof(DomEnt));
+                        }
+                        ents[cnt].ty = ot; ents[cnt].rty = rty;
+                        ents[cnt].a0 = a0; ents[cnt].a1 = a1;
+                        ents[cnt].extra = 0; ents[cnt].gname = gn;
+                        ents[cnt].def_blk = b; ents[cnt].res = r;
+                        cnt++;
+                    }
+                    i++;
+                }
+            }
+            free(ents);
+        }
+    }
+
+    free(bhk); free(bhv);
     free(stack);
     free(in_loop_blk);
     free(tmp);

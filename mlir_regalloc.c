@@ -740,8 +740,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                         ra_is_const(T, ctx, op);
             bool is_remat_x64 = T->remat_alloca &&
                                 (oty == OP_TYPE_LLVM_ALLOCA ||
-                                 oty == OP_TYPE_LLVM_MLIR_ADDRESSOF ||
-                                 oty == OP_TYPE_LLVM_MLIR_UNDEF);
+                                 oty == OP_TYPE_LLVM_MLIR_UNDEF ||
+                                 (oty == OP_TYPE_LLVM_MLIR_ADDRESSOF && n_blocks > 64));
             bool skip = is_c || is_remat_x64 || ra_is_folded(T, ctx, op);
             if (!skip) {
                 size_t nr = MLIR_GetOpNumResults(ctx, op);
