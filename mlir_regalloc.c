@@ -1849,8 +1849,113 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             }
         }
 
+        // Case A: Majority-vote block-arg recoloring.
+        // For each block-arg `vd` (in block `db > 0`), tally votes for each register `pk`
+        // across ALL incoming copy edges (`pred -> db`) AND outgoing copy edges (`db -> succ`),
+        // then pick the highest-vote interference-free register (strictly beating current `pkd`).
         for (int pass = 0; pass < 2; pass++) {
             bool any_rc = false;
+            for (size_t db = 1; db < n_blocks; db++) {
+                MLIR_BlockHandle succ = blk_h[db];
+                size_t dna = MLIR_GetBlockNumArgs(ctx, succ);
+                if (dna == 0) continue;
+                MLIR_OpHandle dterm = MLIR_GetBlockTerminator(ctx, succ);
+                size_t dns = (dterm != MLIR_INVALID_HANDLE) ? MLIR_GetOpNumSuccessors(ctx, dterm) : 0;
+                for (size_t k = 0; k < dna; k++) {
+                    uint32_t vd;
+                    if (!RA_VMAP_GET(MLIR_GetBlockArg(ctx, succ, k), &vd)) continue;
+                    int8_t pkd = home_pk[vd];
+                    if (pkd < 0 || last_use[vd] <= first_pos[vd]) continue;
+
+                    uint32_t votes[RA_MAXPOOL];
+                    memset(votes, 0, (size_t)T->npool * sizeof(uint32_t));
+                    // Incoming edges: pred -> db arg k
+                    for (uint32_t pe = pred_off[db]; pe < pred_off[db + 1]; pe++) {
+                        uint32_t pb = pred_idx[pe];
+                        MLIR_OpHandle pterm = MLIR_GetBlockTerminator(ctx, blk_h[pb]);
+                        if (pterm == MLIR_INVALID_HANDLE) continue;
+                        size_t pns = MLIR_GetOpNumSuccessors(ctx, pterm);
+                        for (size_t ps = 0; ps < pns; ps++) {
+                            if (MLIR_GetOpSuccessor(ctx, pterm, ps) != succ) continue;
+                            if (MLIR_GetOpNumSuccessorOperands(ctx, pterm, ps) <= k) continue;
+                            uint32_t vs;
+                            if (RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, pterm, ps, k), &vs) &&
+                                vs != vd && home_pk[vs] >= 0) {
+                                votes[home_pk[vs]] += 1u;
+                            }
+                        }
+                    }
+                    // Outgoing edges: db -> s2 passing vd to s2's arg k2 (weighted 2x for latch->hdr!)
+                    for (size_t ds = 0; ds < dns; ds++) {
+                        MLIR_BlockHandle s2 = MLIR_GetOpSuccessor(ctx, dterm, ds);
+                        size_t dnso = MLIR_GetOpNumSuccessorOperands(ctx, dterm, ds);
+                        for (size_t k2 = 0; k2 < dnso; k2++) {
+                            if (MLIR_GetOpSuccessorOperand(ctx, dterm, ds, k2) == handle[vd]) {
+                                uint32_t vd2;
+                                if (RA_VMAP_GET(MLIR_GetBlockArg(ctx, s2, k2), &vd2) &&
+                                    vd2 != vd && home_pk[vd2] >= 0) {
+                                    votes[home_pk[vd2]] += 2u;
+                                }
+                            }
+                        }
+                    }
+
+                    // Build `v_blks` for `vd` only if some candidate strictly beats `pkd`.
+                    uint32_t cur_v = votes[pkd];
+                    bool has_better = false;
+                    for (int pk = 0; pk < T->npool; pk++) {
+                        if (pk != pkd && votes[pk] > cur_v && !(crosses[vd] && pk < T->ncaller)) {
+                            has_better = true; break;
+                        }
+                    }
+                    if (!has_better) continue;
+
+                    memset(v_blks, 0, nb_w * sizeof(uint64_t));
+                    a64_bs_set(v_blks, (uint32_t)db);
+                    uint32_t gd = glob_id[vd];
+                    if (gd != UINT32_MAX) {
+                        size_t gw = gd >> 6; uint64_t gbit = 1ull << (gd & 63u);
+                        for (size_t bb = 0; bb < n_blocks; bb++)
+                            if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit))
+                                a64_bs_set(v_blks, (uint32_t)bb);
+                    }
+
+                    // Pick highest-vote interference-free candidate `best_pk`.
+                    int8_t best_pk = -1;
+                    uint32_t best_v = cur_v;
+                    for (int pk = 0; pk < T->npool; pk++) {
+                        if (pk == pkd || votes[pk] <= best_v) continue;
+                        if (crosses[vd] && pk < T->ncaller) continue;
+                        bool ok = true;
+                        for (int32_t ui = reg_head[pk]; ui >= 0 && ok; ui = val_next[ui]) {
+                            uint32_t u = (uint32_t)ui;
+                            if (a64_bs_test(v_blks, def_blk[u])) { ok = false; break; }
+                            uint32_t gu = glob_id[u];
+                            if (gu != UINT32_MAX) {
+                                size_t gw = gu >> 6; uint64_t gbit = 1ull << (gu & 63u);
+                                for (size_t bb = 0; bb < n_blocks; bb++) {
+                                    if (!a64_bs_test(v_blks, (uint32_t)bb)) continue;
+                                    if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit)) {
+                                        ok = false; break;
+                                    }
+                                }
+                            }
+                        }
+                        if (ok) { best_pk = (int8_t)pk; best_v = votes[pk]; }
+                    }
+                    if (best_pk >= 0) {
+                        int32_t *pp = &reg_head[pkd];
+                        while (*pp >= 0 && *pp != (int32_t)vd) pp = &val_next[*pp];
+                        if (*pp == (int32_t)vd) *pp = val_next[vd];
+                        val_next[vd] = reg_head[best_pk];
+                        reg_head[best_pk] = (int32_t)vd;
+                        home_pk[vd] = best_pk;
+                        any_rc = true;
+                    }
+                }
+            }
+
+            // Case B: try recoloring block-local op-defined `vs` to `pkd`.
             for (size_t b = 0; b < n_blocks; b++) {
                 MLIR_BlockHandle bk = blk_h[b];
                 MLIR_OpHandle term = MLIR_GetBlockTerminator(ctx, bk);
@@ -1869,67 +1974,6 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                         if (pks < 0 || pkd < 0 || pks == pkd) continue;
                         if (last_use[vs] <= first_pos[vs] || last_use[vd] <= first_pos[vd]) continue;
 
-                        // Case A: try recoloring block-arg `vd` to `pks`.
-                        uint32_t db = def_blk[vd];
-                        if (db > 0 && MLIR_GetValueDefiningOp(ctx, handle[vd]) == MLIR_INVALID_HANDLE &&
-                            !(crosses[vd] && pks < T->ncaller)) {
-                            memset(v_blks, 0, nb_w * sizeof(uint64_t));
-                            a64_bs_set(v_blks, db);
-                            uint32_t gd = glob_id[vd];
-                            if (gd != UINT32_MAX) {
-                                size_t gw = gd >> 6; uint64_t gbit = 1ull << (gd & 63u);
-                                for (size_t bb = 0; bb < n_blocks; bb++)
-                                    if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit))
-                                        a64_bs_set(v_blks, (uint32_t)bb);
-                            }
-                            bool ok = true;
-                            for (int32_t ui = reg_head[pks]; ui >= 0 && ok; ui = val_next[ui]) {
-                                uint32_t u = (uint32_t)ui;
-                                if (a64_bs_test(v_blks, def_blk[u])) { ok = false; break; }
-                                uint32_t gu = glob_id[u];
-                                if (gu != UINT32_MAX) {
-                                    size_t gw = gu >> 6; uint64_t gbit = 1ull << (gu & 63u);
-                                    for (size_t bb = 0; bb < n_blocks; bb++) {
-                                        if (!a64_bs_test(v_blks, (uint32_t)bb)) continue;
-                                        if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit)) {
-                                            ok = false; break;
-                                        }
-                                    }
-                                }
-                                if (!ok) break;
-                                // Check edge-copy safety on every predecessor of `db`:
-                                // `u` must not be passed to any other arg k' != k on pred -> db.
-                                for (uint32_t pe = pred_off[db]; pe < pred_off[db + 1] && ok; pe++) {
-                                    uint32_t pb = pred_idx[pe];
-                                    MLIR_OpHandle pterm = MLIR_GetBlockTerminator(ctx, blk_h[pb]);
-                                    if (pterm == MLIR_INVALID_HANDLE) continue;
-                                    size_t pns = MLIR_GetOpNumSuccessors(ctx, pterm);
-                                    for (size_t ps = 0; ps < pns && ok; ps++) {
-                                        if (MLIR_GetOpSuccessor(ctx, pterm, ps) != succ) continue;
-                                        size_t pnso = MLIR_GetOpNumSuccessorOperands(ctx, pterm, ps);
-                                        for (size_t pk2 = 0; pk2 < pnso; pk2++) {
-                                            if (pk2 == k) continue;
-                                            if (MLIR_GetOpSuccessorOperand(ctx, pterm, ps, pk2) == handle[u]) {
-                                                ok = false; break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if (ok) {
-                                // Move `vd` from reg_head[pkd] to reg_head[pks].
-                                int32_t *pp = &reg_head[pkd];
-                                while (*pp >= 0 && *pp != (int32_t)vd) pp = &val_next[*pp];
-                                if (*pp == (int32_t)vd) *pp = val_next[vd];
-                                val_next[vd] = reg_head[pks];
-                                reg_head[pks] = (int32_t)vd;
-                                home_pk[vd] = pks;
-                                any_rc = true;
-                                continue;
-                            }
-                        }
-
-                        // Case B: try recoloring block-local op-defined `vs` to `pkd`.
                         if (glob_id[vs] == UINT32_MAX && def_blk[vs] == (uint32_t)b &&
                             !(crosses[vs] && pkd < T->ncaller)) {
                             MLIR_OpHandle sdef = MLIR_GetValueDefiningOp(ctx, handle[vs]);

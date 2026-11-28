@@ -1788,6 +1788,23 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
 
 // emit a terminator (also collects callee refs via lower_op for calls? no -
 // terminators here are br/cond_br/return/unreachable only)
+static bool x64_edge_needs_copy(FnCtx *F, MLIR_OpHandle op, size_t si, MLIR_BlockHandle tgt) {
+    size_t n = MLIR_GetOpNumSuccessorOperands(F->ctx, op, si);
+    if (n == 0) return false;
+    for (size_t i = 0; i < n; i++) {
+        MLIR_ValueHandle sv = MLIR_GetOpSuccessorOperand(F->ctx, op, si, i);
+        MLIR_ValueHandle dv = MLIR_GetBlockArg(F->ctx, tgt, i);
+        if (sv == dv) continue;
+        int sr, dr; int32_t ss, ds;
+        x64_val_home(F, sv, true, &sr, &ss);
+        x64_val_home(F, dv, false, &dr, &ds);
+        if (sr >= 0 && dr >= 0) { if (sr != dr) return true; }
+        else if (sr < 0 && dr < 0 && ss != 0 && ds != 0) { if (ss != ds) return true; }
+        else return true;
+    }
+    return false;
+}
+
 static int x64_defer_cold_pad(FnCtx *F, MLIR_OpHandle term, size_t si,
                               MLIR_BlockHandle tgt, int tgt_lbl) {
     if (F->n_cold_pads == F->c_cold_pads) {
@@ -1829,10 +1846,8 @@ static void lower_term(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle op,
         // only on the branch actually taken — otherwise && / || break.
         MLIR_BlockHandle tt = MLIR_GetOpSuccessor(F->ctx, op, 0);
         MLIR_BlockHandle ft = MLIR_GetOpSuccessor(F->ctx, op, 1);
-        size_t nso_t = MLIR_GetOpNumSuccessorOperands(F->ctx, op, 0);
-        size_t nso_f = MLIR_GetOpNumSuccessorOperands(F->ctx, op, 1);
-        bool need_t = nso_t > 0;
-        bool need_f = nso_f > 0;
+        bool need_t = x64_edge_needs_copy(F, op, 0, tt);
+        bool need_f = x64_edge_needs_copy(F, op, 1, ft);
         load_val(F, MLIR_GetOpOperand(F->ctx, op, 0), RAX);      // cond
         alu_rr(F, 0x85, RAX, RAX, 0);                            // test eax, eax
         int tti = block_index(F->ctx, reg, tt);
@@ -1986,10 +2001,8 @@ static void emit_fused_cond_br(FnCtx *F, MLIR_RegionHandle reg, MLIR_OpHandle br
 
     MLIR_BlockHandle tt = MLIR_GetOpSuccessor(ctx, br_op, 0);
     MLIR_BlockHandle ft = MLIR_GetOpSuccessor(ctx, br_op, 1);
-    size_t nso_t = MLIR_GetOpNumSuccessorOperands(ctx, br_op, 0);
-    size_t nso_f = MLIR_GetOpNumSuccessorOperands(ctx, br_op, 1);
-    bool need_t = nso_t > 0;
-    bool need_f = nso_f > 0;
+    bool need_t = x64_edge_needs_copy(F, br_op, 0, tt);
+    bool need_f = x64_edge_needs_copy(F, br_op, 1, ft);
     int tti = block_index(ctx, reg, tt);
     int fti = block_index(ctx, reg, ft);
     if (!need_t && !need_f) {
