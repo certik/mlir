@@ -53,8 +53,8 @@ expected_stdout = "2 1 7\n2 2\n3\n1\n2\n4 4\n3\n4 4 4 4\n4 4\n1 3 \n5\n"
 name = "struct_field_mixed_ptr_decl"
 targets = ["native", "wasm", "macho", "elf"]
 # A struct field declarator with a different pointer level than the first one
-# (`int *a, b;`) used to get the first one's type; tinyc rejects it (#371).
-expected_compile_error = "unsupported pointer level in a struct field declarator"
+# (`int *a, b;` / `Vdbe **ppVPrev, *pVNext;`) now applies per-declarator stars.
+expected_stdout = ""
 
 [[test]]
 name = "compound_literal_struct_field"
@@ -1887,3 +1887,13 @@ name = "stdlib_math"
 source = "tests/stdlib_math.tc"
 targets = ["native", "wasm", "elf", "macho"]
 expected_stdout = "0 1 1 0 1024 4 2 3\n0 1 256\n"
+
+[[test]]
+name = "lua_sqlite_features"
+targets = ["native", "wasm", "macho", "elf"]
+expected_stdout = "e 42\n8\n1 7 12\n7 15\n30 20 -1 8\n99\n4 7 5 Z 99 77 2\n"
+
+[[test]]
+name = "elf_global_fnptr_and_gep_init"
+targets = ["elf"]
+expected_stdout = "30 50\na 6 7\nb 15 11\n"

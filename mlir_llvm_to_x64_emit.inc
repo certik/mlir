@@ -1386,8 +1386,8 @@ static void emit_func(MLIR_Context *ctx, MLIR_OpHandle fn, ObjModule *m, SymSet 
 #define X64_WASM_ARGC         "__wasm_argc"
 #define X64_WASM_ARGV         "__wasm_argv"
 
-typedef struct { uint32_t slot_off; uint32_t target_off; } X64PtrReloc;
-typedef struct { uint32_t slot_off; string target; } PendingPtrReloc;
+typedef struct { uint32_t slot_off; uint32_t target_off; string fn_target; } X64PtrReloc;
+typedef struct { uint32_t slot_off; string target; int64_t addend; } PendingPtrReloc;
 
 static bool serialize_global_value_attr(MLIR_Context *ctx, MLIR_AttributeHandle va, string name,
                                         Buf *data, uint32_t off, size_t sz) {
@@ -1426,6 +1426,7 @@ static bool parse_trivial_ptr_global_init(MLIR_Context *ctx, MLIR_OpHandle op, s
     MLIR_BlockHandle blk = MLIR_GetRegionBlock(ctx, MLIR_GetOpRegion(ctx, op, 0), 0);
     size_t nb = MLIR_GetBlockNumOps(ctx, blk);
     string target = (string){0};
+    int64_t addend = 0;
     bool only_trivial = true;
 
     for (size_t bi = 0; bi < nb; bi++) {
@@ -1443,6 +1444,16 @@ static bool parse_trivial_ptr_global_init(MLIR_Context *ctx, MLIR_OpHandle op, s
                 return false;
             }
             target = strip_at(MLIR_GetAttributeString(ctx, ga));
+        } else if (bty == OP_TYPE_LLVM_GEP) {
+            MLIR_AttributeHandle ia = MLIR_GetOpAttr(ctx, bop, MLIR_KEY_RAW_CONSTANT_INDICES);
+            if (ia != MLIR_INVALID_HANDLE) {
+                int64_t idx[4];
+                size_t ni = llvm_position_indices(ctx, ia, idx, 4);
+                if (ni == 1) addend += idx[0];
+                else only_trivial = false;
+            } else {
+                only_trivial = false;
+            }
         } else if (bty != OP_TYPE_LLVM_MLIR_ZERO &&
                    bty != OP_TYPE_LLVM_MLIR_UNDEF &&
                    bty != OP_TYPE_LLVM_RETURN) {
@@ -1471,25 +1482,35 @@ static bool parse_trivial_ptr_global_init(MLIR_Context *ctx, MLIR_OpHandle op, s
     }
     (*pend)[*n_pend].slot_off = off;
     (*pend)[*n_pend].target = target;
+    (*pend)[*n_pend].addend = addend;
     (*n_pend)++;
     return true;
 }
 
-static void resolve_pending_ptr_globals(GMap *gm, PendingPtrReloc *pend, size_t n_pend,
+static bool x64_module_has_func_str(MLIR_Context *ctx, MLIR_BlockHandle mb, string name);
+
+static void resolve_pending_ptr_globals(MLIR_Context *ctx, MLIR_BlockHandle mb,
+                                        GMap *gm, PendingPtrReloc *pend, size_t n_pend,
                                         X64PtrReloc **relocs_out, size_t *n_relocs_out) {
     *relocs_out = NULL;
     *n_relocs_out = 0;
     if (!n_pend || !g_x64_ok) return;
 
-    X64PtrReloc *relocs = (X64PtrReloc *)malloc(n_pend * sizeof(X64PtrReloc));
+    X64PtrReloc *relocs = (X64PtrReloc *)calloc(n_pend, sizeof(X64PtrReloc));
     for (size_t k = 0; k < n_pend; k++) {
-        if (!gmap_get(gm, pend[k].target, &relocs[k].target_off)) {
+        uint32_t base_off = 0;
+        if (gmap_get(gm, pend[k].target, &base_off)) {
+            relocs[k].target_off = (uint32_t)((int64_t)base_off + pend[k].addend);
+            relocs[k].slot_off = pend[k].slot_off;
+        } else if (pend[k].addend == 0 && x64_module_has_func_str(ctx, mb, pend[k].target)) {
+            relocs[k].fn_target = pend[k].target;
+            relocs[k].slot_off = pend[k].slot_off;
+        } else {
             fprintf(stderr, "x64: pointer global target '%.*s' not found\n",
                     (int)pend[k].target.size, pend[k].target.str);
             g_x64_ok = false;
             break;
         }
-        relocs[k].slot_off = pend[k].slot_off;
     }
     if (g_x64_ok) {
         *relocs_out = relocs;
@@ -1517,6 +1538,16 @@ static bool x64_is_func_op(MLIR_Context *ctx, MLIR_OpHandle op) {
 }
 
 // True if the module has a function named `name` (defined when require_body).
+static bool x64_module_has_func_str(MLIR_Context *ctx, MLIR_BlockHandle mb, string name) {
+    size_t no = MLIR_GetBlockNumOps(ctx, mb);
+    for (size_t i = 0; i < no; i++) {
+        MLIR_OpHandle op = MLIR_GetBlockOp(ctx, mb, i);
+        if (!x64_is_func_op(ctx, op)) continue;
+        if (str_eq(strip_at(attr_str(ctx, op, MLIR_KEY_SYM_NAME)), name)) return true;
+    }
+    return false;
+}
+
 static bool x64_module_has_func(MLIR_Context *ctx, MLIR_BlockHandle mb, const char *name, bool require_body) {
     size_t no = MLIR_GetBlockNumOps(ctx, mb);
     for (size_t i = 0; i < no; i++) {
@@ -1557,6 +1588,7 @@ static void x64_on_global_reloc(void *ud, unsigned rel_off, string target) {
     }
     (*rc->pend)[*rc->n_pend].slot_off = rc->base_off + rel_off;
     (*rc->pend)[*rc->n_pend].target = target;
+    (*rc->pend)[*rc->n_pend].addend = 0;
     (*rc->n_pend)++;
 }
 
@@ -1687,7 +1719,7 @@ static void x64_init_data_section(MLIR_Context *ctx, MLIR_BlockHandle mb, GMap *
     }
     if (bss_ops != bss_stk) free(bss_ops);
 
-    resolve_pending_ptr_globals(gm, pend, n_pend, relocs_out, n_relocs_out);
+    resolve_pending_ptr_globals(ctx, mb, gm, pend, n_pend, relocs_out, n_relocs_out);
     free(pend);
 }
 
@@ -1827,7 +1859,10 @@ static void synth_start(ObjModule *m, GMap *gm, Buf *data,
 
     // One-time startup: fill pointer globals (addressof @sym; return initializers).
     for (size_t k = 0; k < n_relocs; k++) {
-        lea_rip_data(&F, R10, relocs[k].target_off);
+        if (relocs[k].fn_target.size > 0)
+            lea_rip_func(&F, R10, relocs[k].fn_target);
+        else
+            lea_rip_data(&F, R10, relocs[k].target_off);
         lea_rip_data(&F, R11, relocs[k].slot_off);
         store_mem(&F, R11, R10, 8);
     }
@@ -2038,6 +2073,22 @@ bool mlir_llvm_to_elf(MLIR_Context *ctx, MLIR_OpHandle llvm_module,
             while (def_ht[k]) {
                 size_t idx = def_ht[k] - 1;
                 if (str_eq(defs[idx].name, roots[ri])) {
+                    if (!defs[idx].visited) {
+                        defs[idx].visited = true;
+                        workq[qt++] = idx;
+                    }
+                    break;
+                }
+                k = (k + 1) & def_hmask;
+            }
+        }
+        for (size_t ri = 0; ri < n_ptr_relocs; ri++) {
+            if (!ptr_relocs[ri].fn_target.size) continue;
+            string fn_t = ptr_relocs[ri].fn_target;
+            size_t k = x64_str_hash(fn_t.str, fn_t.size) & def_hmask;
+            while (def_ht[k]) {
+                size_t idx = def_ht[k] - 1;
+                if (str_eq(defs[idx].name, fn_t)) {
                     if (!defs[idx].visited) {
                         defs[idx].visited = true;
                         workq[qt++] = idx;

@@ -1,0 +1,118 @@
+extern int printf(const char *fmt, ...);
+#include <stdarg.h>
+
+typedef struct Pair Pair;
+static struct Pair {
+    int a;
+    double b;
+} g_pair = { 7, 3.0 * 4.0 };
+
+typedef int (*BinOp)(int, int);
+static int add2(int x, int y) { return x + y; }
+static int call_deref(BinOp f, int x, int y) { return (*f)(x, y); }
+
+static int va_fnptr_call(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    BinOp fn = va_arg(ap, BinOp);
+    va_end(ap);
+    return (*fn)(n, 5);
+}
+
+union Endian {
+    int dummy;
+    char little;
+};
+static const union Endian g_endian = { 1 };
+
+struct Holder {
+    int tag;
+    char buf[8];
+    struct Pair *grid[2][2];
+};
+
+typedef long MyBuf[4];
+static long first_elem(MyBuf b) { return b[0]; }
+
+static void bump(int *p) { *p = *p + 1; }
+
+static int scoped_switch(int x) {
+    int out = 0;
+    switch (x) {
+        int pre;
+    case 1: {
+        pre = 10;
+        out += pre;
+    case 2:
+        out += 20;
+        break;
+    }
+    default:
+        out = -1;
+        break;
+    }
+    return out;
+}
+
+static int loop_labels_after_continue(int n) {
+    int sum = 0;
+    int i = 0;
+    while (i < n) {
+        if (i == 2) goto skip_it;
+        goto add_it;
+    skip_it:
+        i++;
+        continue;
+    add_it:
+        sum += i;
+        i++;
+        continue;
+    }
+    return sum;
+}
+
+int main(void) {
+    // 1. String literal indexing + unary +
+    printf("%c %d\n", "hello"[1], +42);
+
+    // 2. __builtin_offsetof
+    printf("%d\n", (int)__builtin_offsetof(struct Pair, b));
+
+    // 3. Global union init + float const binop + inline named struct global
+    printf("%d %d %d\n", (int)g_endian.little, g_pair.a, (int)g_pair.b);
+
+    // 4. (*fnptr)(...) + va_arg(ap, fnptr)
+    printf("%d %d\n", call_deref(add2, 3, 4), va_fnptr_call(10, add2));
+
+    // 5. Scoped case in switch + labels after continue in loop
+    printf("%d %d %d %d\n",
+           scoped_switch(1), scoped_switch(2), scoped_switch(9),
+           loop_labels_after_continue(5));
+
+    // 6. Mixed value/pointer typedef multi-decl
+    Pair p1, *pp;
+    p1.a = 99;
+    pp = &p1;
+    printf("%d\n", pp->a);
+
+    // 7. Local float/double/long long arrays + 2D static local array + &s->arr
+    double da[2];
+    da[0] = 1.5; da[1] = 2.5;
+    float fa[2];
+    fa[0] = 3.0f; fa[1] = 4.0f;
+    static const unsigned char mat[2][2] = { { 1, 2 }, { 3, 4 } };
+    struct Holder h;
+    h.buf[0] = 'Z';
+    char *bp = (char *)&h.buf;
+    h.grid[1][0] = &p1;
+    Pair **row = h.grid[1];
+    MyBuf mb;
+    mb[0] = 77;
+    int v = 0;
+    (bump(&v), bump(&v));
+    printf("%d %d %d %c %d %d %d\n",
+           (int)(da[0] + da[1]), (int)(fa[0] + fa[1]),
+           (int)(mat[0][1] + mat[1][0]), *bp, row[0]->a,
+           (int)first_elem(mb), v);
+    return 0;
+}

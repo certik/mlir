@@ -1171,7 +1171,8 @@ static void print_const_bytes(Buf *out, MLIR_Context *ctx, MLIR_TypeHandle ty,
                 return;
             }
         }
-        buf_cstr(out, "null");
+        if (bits != 0) buf_printf(out, "inttoptr (i64 %llu to ptr)", (unsigned long long)bits);
+        else buf_cstr(out, "null");
     } else if (is_float_w(ctx, ty, 32)) {
         uint32_t b32 = (uint32_t)bits;
         float f;
@@ -1298,6 +1299,21 @@ static void emit_global(MLIR_Context *ctx, Buf *out, MLIR_OpHandle gop) {
                     MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
                     char *lit = inline_literal_for(ctx, def, MLIR_GetValueType(ctx, v));
                     if (lit) { init = lit; break; }
+                    if (def != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, def) == OP_TYPE_LLVM_GEP &&
+                        MLIR_GetOpNumOperands(ctx, def) == 1) {
+                        MLIR_OpHandle base_op = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, def, 0));
+                        char *base_lit = inline_literal_for(ctx, base_op, MLIR_GetValueType(ctx, v));
+                        MLIR_AttributeHandle ria = find_attr(ctx, def, MLIR_KEY_RAW_CONSTANT_INDICES);
+                        int32_t cidx[4];
+                        if (base_lit && ria != MLIR_INVALID_HANDLE &&
+                            MLIR_GetAttributeDenseI32(ctx, ria, cidx, 4) == 1 &&
+                            cidx[0] != (int32_t)0x80000000) {
+                            init = fmt_alloc("getelementptr (i8, ptr %s, i64 %d)", base_lit, (int)cidx[0]);
+                            free(base_lit);
+                            break;
+                        }
+                        free(base_lit);
+                    }
                     // A constant aggregate built by an llvm.insertvalue
                     // chain (a struct initializer, or an array from
                     // MLIR_CreateLLVMGlobalArrayInit's upstream impl).

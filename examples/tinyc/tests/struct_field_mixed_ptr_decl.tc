@@ -1,2 +1,2 @@
 struct S { int *a, b; };
-int main(void) { struct S s; s.b = 1; return s.b; }
+int main(void) { struct S s; int x = 42; s.a = &x; s.b = 1; return (*s.a == 42 && s.b == 1) ? 0 : 1; }

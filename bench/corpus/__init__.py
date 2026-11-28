@@ -91,7 +91,7 @@ CORPUS = [
         "tinyc_flags": ["--host-varargs"],
         "argv": lambda src: [str(HERE / "lua" / "bench.lua"), "10"],
         "check": "fib\t196418",
-        "blockers": "comma operator (#287); #333 #335 #339 #340 #341 #314 #317; setjmp/longjmp (#337)",
+        "blockers": "",
     },
     {
         "name": "sqlite",
@@ -111,7 +111,6 @@ CORPUS = [
         # The recursive-CTE query (sum of squares 1..1000) prints this for any
         # row count.
         "check": "333833500",
-        "blockers": "comma operator (#287), bit-fields (#336), #314 #315 #316 #317 "
-                    "#290 #333 #339 #340 #341",
+        "blockers": "",
     },
 ]
