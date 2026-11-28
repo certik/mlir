@@ -1871,6 +1871,10 @@ static int tinyc_main(void) {
             true;
 #endif
         if (run_native_opts) {
+            if (opt_level >= 2) {
+                mlir_llvm_inline(ctx, module);
+                mlir_llvm_tre(ctx, module);
+            }
             uint64_t t_lcse = ts_now();
             mlir_llvm_load_cse(ctx, module);
             ts_add(TS_LOAD_CSE, t_lcse);
