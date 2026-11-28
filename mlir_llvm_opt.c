@@ -1547,3 +1547,295 @@ void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module) {
         simplify_cfg_func(ctx, fn);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Constant folding, algebraic identities, and constant-branch folding.
+// ---------------------------------------------------------------------------
+static bool cf_get_int_const(MLIR_Context *ctx, MLIR_ValueHandle v, int64_t *out, uint32_t *out_w) {
+    MLIR_TypeHandle ty = MLIR_GetValueType(ctx, v);
+    if (MLIR_GetTypeKind(ctx, ty) != MLIR_TYPE_KIND_INTEGER) return false;
+    uint32_t w = MLIR_GetTypeWidth(ctx, ty);
+    if (w == 0 || w > 64) return false;
+    MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, v);
+    if (def == MLIR_INVALID_HANDLE) return false;
+    MLIR_OpType dt = MLIR_GetOpType(ctx, def);
+    int64_t val = 0;
+    if (dt == OP_TYPE_LLVM_MLIR_ZERO) {
+        val = 0;
+    } else if (dt == OP_TYPE_LLVM_MLIR_CONSTANT) {
+        MLIR_AttributeHandle va = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
+        if (va == MLIR_INVALID_HANDLE) return false;
+        val = MLIR_GetAttributeInteger(ctx, va);
+    } else {
+        return false;
+    }
+    if (w < 64) val = (int64_t)((uint64_t)val & ((1ull << w) - 1ull));
+    *out = val;
+    if (out_w) *out_w = w;
+    return true;
+}
+
+static inline int64_t cf_sext(int64_t v, uint32_t w) {
+    if (w >= 64) return v;
+    uint64_t mask = (1ull << w) - 1ull;
+    uint64_t sign = 1ull << (w - 1);
+    return (int64_t)((((uint64_t)v & mask) ^ sign) - sign);
+}
+
+static inline int64_t cf_mask(int64_t v, uint32_t w) {
+    if (w >= 64) return v;
+    return (int64_t)((uint64_t)v & ((1ull << w) - 1ull));
+}
+
+static MLIR_ValueHandle cf_make_int_const(MLIR_Context *ctx, MLIR_BlockHandle bk,
+                                          size_t idx, MLIR_TypeHandle ty, int64_t val) {
+    MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeInteger(ctx, val, ty));
+    MLIR_OpSpec sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.type = OP_TYPE_LLVM_MLIR_CONSTANT;
+    sp.result_types = &ty;
+    sp.n_results = 1;
+    sp.attrs = &attr;
+    sp.n_attrs = 1;
+    MLIR_OpHandle c = MLIR_CreateOpFromSpec(ctx, &sp);
+    MLIR_InsertBlockOpAtIndex(ctx, bk, c, idx);
+    return MLIR_GetOpResult(ctx, c, 0);
+}
+
+static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    if (MLIR_GetOpNumRegions(ctx, fn) == 0) return;
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    for (int round = 0; round < 2; round++) {
+        bool changed = false;
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t i = 0;
+            while (i < MLIR_GetBlockNumOps(ctx, bk)) {
+                MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+                MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+
+                // Constant-condition branch folding: cond_br(const) -> br
+                if (ot == OP_TYPE_LLVM_COND_BR) {
+                    int64_t cc = 0;
+                    if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, op, 0), &cc, NULL)) {
+                        size_t arm = (cc != 0) ? 0 : 1;
+                        MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(ctx, op, arm);
+                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, arm);
+                        if (nso <= 64) {
+                            MLIR_ValueHandle sops[64];
+                            for (size_t k = 0; k < nso; k++)
+                                sops[k] = MLIR_GetOpSuccessorOperand(ctx, op, arm, k);
+                            uint32_t nso32 = (uint32_t)nso;
+                            MLIR_OpSpec bsp;
+                            memset(&bsp, 0, sizeof(bsp));
+                            bsp.type = OP_TYPE_LLVM_BR;
+                            bsp.operands = sops;
+                            bsp.n_operands = nso;
+                            bsp.successors = &tgt;
+                            bsp.n_successors = 1;
+                            bsp.successor_operand_counts = &nso32;
+                            MLIR_OpHandle nbr = MLIR_CreateOpFromSpec(ctx, &bsp);
+                            MLIR_InsertBlockOpAtIndex(ctx, bk, nbr, i);
+                            MLIR_DetachOp(ctx, op);
+                            changed = true;
+                            continue;
+                        }
+                    }
+                    i++;
+                    continue;
+                }
+
+                if (MLIR_GetOpNumResults(ctx, op) != 1) { i++; continue; }
+                MLIR_ValueHandle res = MLIR_GetOpResult(ctx, op, 0);
+                MLIR_TypeHandle rty = MLIR_GetValueType(ctx, res);
+                MLIR_TypeKind rk = MLIR_GetTypeKind(ctx, rty);
+
+                // Casts of integer constants: sext / zext / trunc / sitofp / uitofp
+                if (ot == OP_TYPE_LLVM_SEXT || ot == OP_TYPE_LLVM_ZEXT || ot == OP_TYPE_LLVM_TRUNC) {
+                    int64_t c0 = 0; uint32_t sw = 0;
+                    if (rk == MLIR_TYPE_KIND_INTEGER &&
+                        cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, op, 0), &c0, &sw)) {
+                        uint32_t rw = MLIR_GetTypeWidth(ctx, rty);
+                        int64_t rv = (ot == OP_TYPE_LLVM_SEXT) ? cf_mask(cf_sext(c0, sw), rw)
+                                                               : cf_mask(c0, rw);
+                        MLIR_ValueHandle nv = cf_make_int_const(ctx, bk, i, rty, rv);
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, nv);
+                        MLIR_DetachOp(ctx, op);
+                        changed = true;
+                        continue;
+                    }
+                    i++; continue;
+                }
+                if (ot == OP_TYPE_LLVM_SITOFP || ot == OP_TYPE_LLVM_UITOFP) {
+                    int64_t c0 = 0; uint32_t sw = 0;
+                    if (rk == MLIR_TYPE_KIND_FLOAT &&
+                        cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, op, 0), &c0, &sw)) {
+                        double dv = (ot == OP_TYPE_LLVM_SITOFP)
+                            ? (double)cf_sext(c0, sw)
+                            : (double)(uint64_t)cf_mask(c0, sw);
+                        MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_VALUE, MLIR_CreateAttributeFloat(ctx, dv, rty));
+                        MLIR_OpSpec sp;
+                        memset(&sp, 0, sizeof(sp));
+                        sp.type = OP_TYPE_LLVM_MLIR_CONSTANT;
+                        sp.result_types = &rty;
+                        sp.n_results = 1;
+                        sp.attrs = &attr;
+                        sp.n_attrs = 1;
+                        MLIR_OpHandle c = MLIR_CreateOpFromSpec(ctx, &sp);
+                        MLIR_InsertBlockOpAtIndex(ctx, bk, c, i);
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, MLIR_GetOpResult(ctx, c, 0));
+                        MLIR_DetachOp(ctx, op);
+                        changed = true;
+                        continue;
+                    }
+                    i++; continue;
+                }
+
+                // Select folding
+                if (ot == OP_TYPE_LLVM_SELECT) {
+                    MLIR_ValueHandle vc = MLIR_GetOpOperand(ctx, op, 0);
+                    MLIR_ValueHandle vt = MLIR_GetOpOperand(ctx, op, 1);
+                    MLIR_ValueHandle vf = MLIR_GetOpOperand(ctx, op, 2);
+                    int64_t cc = 0;
+                    if (vt == vf) {
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, vt);
+                        MLIR_DetachOp(ctx, op);
+                        changed = true; continue;
+                    }
+                    if (cf_get_int_const(ctx, vc, &cc, NULL)) {
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, cc != 0 ? vt : vf);
+                        MLIR_DetachOp(ctx, op);
+                        changed = true; continue;
+                    }
+                    i++; continue;
+                }
+
+                // Integer binary ops + icmp
+                if (MLIR_GetOpNumOperands(ctx, op) == 2 && rk == MLIR_TYPE_KIND_INTEGER) {
+                    MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, op, 0);
+                    MLIR_ValueHandle a1 = MLIR_GetOpOperand(ctx, op, 1);
+                    int64_t c0 = 0, c1 = 0;
+                    uint32_t w0 = 0, w1 = 0;
+                    bool k0 = cf_get_int_const(ctx, a0, &c0, &w0);
+                    bool k1 = cf_get_int_const(ctx, a1, &c1, &w1);
+                    uint32_t rw = MLIR_GetTypeWidth(ctx, rty);
+
+                    if (ot == OP_TYPE_LLVM_ICMP && k0 && k1) {
+                        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
+                        int64_t pred = pa ? MLIR_GetAttributeInteger(ctx, pa) : 0;
+                        int64_t s0 = cf_sext(c0, w0), s1 = cf_sext(c1, w0);
+                        uint64_t u0 = (uint64_t)cf_mask(c0, w0), u1 = (uint64_t)cf_mask(c1, w0);
+                        int64_t rv = 0;
+                        switch (pred) {
+                        case 0: rv = (u0 == u1); break;
+                        case 1: rv = (u0 != u1); break;
+                        case 2: rv = (s0 <  s1); break;
+                        case 3: rv = (s0 <= s1); break;
+                        case 4: rv = (s0 >  s1); break;
+                        case 5: rv = (s0 >= s1); break;
+                        case 6: rv = (u0 <  u1); break;
+                        case 7: rv = (u0 <= u1); break;
+                        case 8: rv = (u0 >  u1); break;
+                        case 9: rv = (u0 >= u1); break;
+                        default: break;
+                        }
+                        MLIR_ValueHandle nv = cf_make_int_const(ctx, bk, i, rty, rv);
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, nv);
+                        MLIR_DetachOp(ctx, op);
+                        changed = true; continue;
+                    }
+
+                    // Both constant -> fold!
+                    if (k0 && k1 && rw > 0 && rw <= 64) {
+                        uint64_t u0 = (uint64_t)cf_mask(c0, rw), u1 = (uint64_t)cf_mask(c1, rw);
+                        int64_t s0 = cf_sext(c0, rw), s1 = cf_sext(c1, rw);
+                        bool folded = true;
+                        uint64_t ur = 0;
+                        switch (ot) {
+                        case OP_TYPE_LLVM_ADD:  ur = u0 + u1; break;
+                        case OP_TYPE_LLVM_SUB:  ur = u0 - u1; break;
+                        case OP_TYPE_LLVM_MUL:  ur = u0 * u1; break;
+                        case OP_TYPE_LLVM_AND:  ur = u0 & u1; break;
+                        case OP_TYPE_LLVM_OR:   ur = u0 | u1; break;
+                        case OP_TYPE_LLVM_XOR:  ur = u0 ^ u1; break;
+                        case OP_TYPE_LLVM_SHL:  ur = (u1 < rw) ? (u0 << u1) : 0; break;
+                        case OP_TYPE_LLVM_LSHR: ur = (u1 < rw) ? (u0 >> u1) : 0; break;
+                        case OP_TYPE_LLVM_ASHR: ur = (u1 < rw) ? (uint64_t)(s0 >> u1) : (s0 < 0 ? ~(uint64_t)0 : 0); break;
+                        case OP_TYPE_LLVM_UDIV: if (u1 != 0) ur = u0 / u1; else folded = false; break;
+                        case OP_TYPE_LLVM_UREM: if (u1 != 0) ur = u0 % u1; else folded = false; break;
+                        case OP_TYPE_LLVM_SDIV:
+                            if (s1 != 0 && !(rw == 64 && s0 == INT64_MIN && s1 == -1))
+                                ur = (uint64_t)(s0 / s1);
+                            else folded = false;
+                            break;
+                        case OP_TYPE_LLVM_SREM:
+                            if (s1 != 0 && !(rw == 64 && s0 == INT64_MIN && s1 == -1))
+                                ur = (uint64_t)(s0 % s1);
+                            else folded = false;
+                            break;
+                        default: folded = false; break;
+                        }
+                        if (folded) {
+                            MLIR_ValueHandle nv = cf_make_int_const(ctx, bk, i, rty, cf_mask((int64_t)ur, rw));
+                            MLIR_ReplaceAllUsesOfValue(ctx, res, nv);
+                            MLIR_DetachOp(ctx, op);
+                            changed = true; continue;
+                        }
+                    }
+
+                    // Algebraic identities (one operand constant or a0 == a1)
+                    MLIR_ValueHandle repl = MLIR_INVALID_HANDLE;
+                    bool repl_zero = false;
+                    if (k1 && c1 == 0) {
+                        if (ot == OP_TYPE_LLVM_ADD || ot == OP_TYPE_LLVM_SUB ||
+                            ot == OP_TYPE_LLVM_OR  || ot == OP_TYPE_LLVM_XOR ||
+                            ot == OP_TYPE_LLVM_SHL || ot == OP_TYPE_LLVM_LSHR || ot == OP_TYPE_LLVM_ASHR)
+                            repl = a0;
+                        else if (ot == OP_TYPE_LLVM_MUL || ot == OP_TYPE_LLVM_AND)
+                            repl_zero = true;
+                    } else if (k0 && c0 == 0) {
+                        if (ot == OP_TYPE_LLVM_ADD || ot == OP_TYPE_LLVM_OR || ot == OP_TYPE_LLVM_XOR)
+                            repl = a1;
+                        else if (ot == OP_TYPE_LLVM_MUL || ot == OP_TYPE_LLVM_AND)
+                            repl_zero = true;
+                    } else if (k1 && c1 == 1 && (ot == OP_TYPE_LLVM_MUL || ot == OP_TYPE_LLVM_SDIV || ot == OP_TYPE_LLVM_UDIV)) {
+                        repl = a0;
+                    } else if (k0 && c0 == 1 && ot == OP_TYPE_LLVM_MUL) {
+                        repl = a1;
+                    } else if (a0 == a1) {
+                        if (ot == OP_TYPE_LLVM_SUB || ot == OP_TYPE_LLVM_XOR) repl_zero = true;
+                        else if (ot == OP_TYPE_LLVM_AND || ot == OP_TYPE_LLVM_OR) repl = a0;
+                    }
+                    if (repl_zero) {
+                        MLIR_ValueHandle nv = cf_make_int_const(ctx, bk, i, rty, 0);
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, nv);
+                        MLIR_DetachOp(ctx, op);
+                        changed = true; continue;
+                    }
+                    if (repl != MLIR_INVALID_HANDLE) {
+                        MLIR_ReplaceAllUsesOfValue(ctx, res, repl);
+                        MLIR_DetachOp(ctx, op);
+                        changed = true; continue;
+                    }
+                }
+                i++;
+            }
+        }
+        if (!changed) break;
+    }
+}
+
+void mlir_llvm_constfold(MLIR_Context *ctx, MLIR_OpHandle module) {
+    if (getenv("TINYC_NO_CONSTFOLD")) return;
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t n = MLIR_GetBlockNumOps(ctx, mb);
+    for (size_t i = 0; i < n; i++) {
+        MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
+        constfold_func(ctx, fn);
+    }
+}
