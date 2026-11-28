@@ -302,6 +302,11 @@ typedef struct {
     bool          has_gep_skip;
     SlotMap       spill;
     bool          has_spill;
+    SlotMap       call_save_mask; // (ValueHandle)call_op -> live caller-saved pool bitmask
+    bool          has_call_save;
+    int           call_save_ncaller;
+    uint8_t       call_save_reg[8];
+    int32_t       call_save_off[8];
     bool          fast_ra;   // true when mlir_regalloc_fast ran (never maps remat ops)
     uint32_t      used_mask; // callee-saved pool regs the allocator used
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area

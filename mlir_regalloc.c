@@ -669,7 +669,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         n_blocks * (sizeof(uint32_t) * 6 + 8) +
         (n_blocks + 1) * (sizeof(uint32_t) * 3 + sizeof(int64_t) + 8) +
         nv_alloc * (sizeof(MLIR_ValueHandle) + sizeof(uint32_t) * 12 +
-                    sizeof(uint64_t) + sizeof(uint8_t) * 2 + sizeof(int32_t) + 8) +
+                    sizeof(uint64_t) * 2 + sizeof(uint8_t) * 2 + sizeof(int32_t) + 8) +
         256;
     uint8_t *mbuf = (uint8_t *)ra_pool_ensure(&g_ra_main_pool, main_need);
     size_t moff = 0;
@@ -686,6 +686,8 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint32_t *first_pos = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
     uint32_t *last_use  = (uint32_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint32_t));
     uint64_t *weight    = (uint64_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint64_t));
+    uint64_t *call_cross_w = (uint64_t *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint64_t));
+    memset(call_cross_w, 0, nv_alloc * sizeof(uint64_t));
     uint8_t  *crosses   = (uint8_t  *)ra_bump(mbuf, &moff, nv_alloc * sizeof(uint8_t));
     memset(crosses, 0, nv_alloc * sizeof(uint8_t));
     int8_t   *home_pk   = (int8_t   *)ra_bump(mbuf, &moff, nv_alloc * sizeof(int8_t));
@@ -1249,7 +1251,18 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     }
                 }
                 if (const_live) {
-                    for (size_t wi = 0; wi < bw_g; wi++) cross_g[wi] |= LO[wi];
+                    uint64_t cw = (loop_depth ? A64_USE_WEIGHT_AT(loop_depth[b]) : 1ull) * (uint64_t)(c1 - c0);
+                    for (size_t wi = 0; wi < bw_g; wi++) {
+                        uint64_t wlo = LO[wi];
+                        cross_g[wi] |= wlo;
+                        if (T->call_save_mask) {
+                            while (wlo) {
+                                uint32_t g = (uint32_t)(wi * 64u) + ra_ctz64(wlo);
+                                wlo &= wlo - 1;
+                                call_cross_w[glob_vi[g]] += cw;
+                            }
+                        }
+                    }
                 } else {
                     MLIR_BlockHandle bk = blk_h[b];
                     size_t no = MLIR_GetBlockNumOps(ctx, bk);
@@ -1286,7 +1299,18 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                             }
                             bool had_rg = (rg != UINT32_MAX && a64_bs_test(live_g, rg));
                             if (had_rg) a64_bs_clear(live_g, rg);
-                            for (size_t wi = 0; wi < bw_g; wi++) cross_g[wi] |= live_g[wi];
+                            uint64_t cw = loop_depth ? A64_USE_WEIGHT_AT(loop_depth[b]) : 1ull;
+                            for (size_t wi = 0; wi < bw_g; wi++) {
+                                uint64_t wlg = live_g[wi];
+                                cross_g[wi] |= wlg;
+                                if (T->call_save_mask) {
+                                    while (wlg) {
+                                        uint32_t g = (uint32_t)(wi * 64u) + ra_ctz64(wlg);
+                                        wlg &= wlg - 1;
+                                        call_cross_w[glob_vi[g]] += cw;
+                                    }
+                                }
+                            }
                             if (had_rg) a64_bs_set(live_g, rg);
                             c_idx--;
                             if (c_idx > c0) next_call_i = call_pos_arr[c_idx - 1] - bfirst;
@@ -1341,11 +1365,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                 for (uint32_t vi = v0; vi < v1; vi++) {
                     if (glob_id && glob_id[vi] != UINT32_MAX) continue;
                     if (last_use[vi] <= min_use || def_pos[vi] >= max_def) continue;
+                    uint64_t cw = loop_depth ? A64_USE_WEIGHT_AT(loop_depth[b]) : 1ull;
                     for (uint32_t c = c0; c < c1; c++) {
                         uint32_t cp = call_pos_arr[c];
                         if (def_pos[vi] < A64_DEFP(cp) && last_use[vi] > A64_USEP(cp)) {
                             crosses[vi] = 1;
-                            break;
+                            call_cross_w[vi] += cw;
+                            if (!T->call_save_mask) break;
                         }
                     }
                 }
@@ -1401,7 +1427,6 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             }
         }
     }
-    #undef RA_VMAP_GET
 
     // --- 4. Linear scan over the pool, loop-weighted eviction. ---
     uint32_t *order = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
@@ -1435,6 +1460,18 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     uint32_t pool_mask = (T->npool >= 32) ? 0xFFFFFFFFu : ((1u << T->npool) - 1u);
     uint32_t caller_mask = (T->ncaller >= 32) ? 0xFFFFFFFFu : ((1u << T->ncaller) - 1u);
     uint32_t callee_mask = pool_mask & ~caller_mask;
+    // Detect call-sparse switch-dispatch loops (e.g. luaV_execute): many backedges
+    // to a single loop header AND <= 25% of blocks contain a call, so calls live
+    // in cold mutually-exclusive slow-path cases rather than the hot dispatch path.
+    bool is_dispatch_loop = false;
+    if (hdr_in && n_calls_tot > 0) {
+        size_t n_call_blks = 0;
+        for (size_t b = 0; b < n_blocks; b++) {
+            if (call_off[b] < call_off[b + 1]) n_call_blks++;
+            if (hdr_in[b] >= 8u) is_dispatch_loop = true;
+        }
+        if (n_call_blks * 4u > n_blocks) is_dispatch_loop = false;
+    }
 
     for (uint32_t k = 0; k < nv; k++) {
         uint32_t vi = order[k];
@@ -1486,8 +1523,223 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             home_pk[act_vi[evict_a]] = -1;          // evicted -> slot
             act_vi[evict_a] = vi; act_end[evict_a] = lu; // reuse its register
             home_pk[vi] = (int8_t)act_pk[evict_a];
+        } else if (callee_only && T->call_save_mask && !env->linear_crosses && caller_mask) {
+            // Callee-saved regs are full with higher-weight values. If keeping `vi`
+            // in a caller-saved reg and saving/restoring only around crossed calls is
+            // cheaper than spilling on every use, allocate from caller_mask.
+            uint64_t vi_cost = is_dispatch_loop ? (call_cross_w[vi] / 16ull) : (call_cross_w[vi] * 2ull);
+            if (weight[vi] > vi_cost) {
+                uint64_t vi_eff = weight[vi] - vi_cost;
+                uint32_t cavail = (~busy_mask) & caller_mask;
+                if (cavail) {
+                    uint32_t found = ra_ctz64((uint64_t)cavail);
+                    busy_mask |= (1u << found);
+                    act_vi[nact] = vi; act_end[nact] = lu; act_pk[nact] = (uint8_t)found; nact++;
+                    home_pk[vi] = (int8_t)found;
+                } else {
+                    size_t cevict = (size_t)-1; uint64_t cbest_w = 0; uint32_t cbest_end = 0;
+                    for (size_t a = 0; a < nact; a++) {
+                        if (act_pk[a] >= T->ncaller) continue;
+                        uint32_t av = act_vi[a];
+                        uint64_t ac = crosses[av] ? (is_dispatch_loop ? (call_cross_w[av] / 16ull) : (call_cross_w[av] * 2ull)) : 0ull;
+                        uint64_t aw = weight[av] > ac ? (weight[av] - ac) : 0ull;
+                        uint32_t ae = act_end[a];
+                        if (cevict == (size_t)-1 || aw < cbest_w || (aw == cbest_w && ae > cbest_end)) {
+                            cevict = a; cbest_w = aw; cbest_end = ae;
+                        }
+                    }
+                    if (cevict != (size_t)-1 && cbest_w < vi_eff) {
+                        home_pk[act_vi[cevict]] = -1;
+                        act_vi[cevict] = vi; act_end[cevict] = lu;
+                        home_pk[vi] = (int8_t)act_pk[cevict];
+                    }
+                }
+            }
         }
     }
+
+    // --- 4a. Populate per-call live caller-saved register masks if any call-crossing
+    //         value was assigned a caller-saved register. ---
+    if (T->call_save_mask && !env->linear_crosses && n_calls_tot > 0) {
+        bool any_cs = false;
+        for (uint32_t vi = 0; vi < nv; vi++) {
+            if (crosses[vi] && home_pk[vi] >= 0 && home_pk[vi] < T->ncaller) {
+                any_cs = true; break;
+            }
+        }
+        if (any_cs) {
+            uint32_t used_cs = 0;
+            uint64_t *live_g  = bw_g ? (live_out + n_blocks * bw_g * 3 + bw_g) : NULL;
+            uint64_t *cs_glob = bw_g ? (live_g + bw_g) : NULL;
+            if (bw_g) {
+                memset(cs_glob, 0, bw_g * sizeof(uint64_t));
+                for (uint32_t g = 0; g < n_glob; g++) {
+                    uint32_t vi = glob_vi[g];
+                    if (crosses[vi] && home_pk[vi] >= 0 && home_pk[vi] < T->ncaller)
+                        a64_bs_set(cs_glob, g);
+                }
+            }
+            for (size_t b = 0; b < n_blocks; b++) {
+                uint32_t c0 = call_off[b], c1 = call_off[b + 1];
+                if (c0 == c1) continue;
+                MLIR_BlockHandle bk = blk_h[b];
+                uint32_t bfirst = block_first[b];
+                uint32_t v0 = blk_vstart[b], v1 = blk_vstart[b + 1];
+                // Helper: local values in caller-saved regs crossing call cp.
+                if (bw_g) {
+                    const uint64_t *LO = live_out + b * bw_g;
+                    const uint64_t *K  = kill_g + b * bw_g;
+                    const uint64_t *G  = gen_g + b * bw_g;
+                    bool const_live = (b > 0 || n_entry_args == 0);
+                    if (const_live) {
+                        for (size_t wi = 0; wi < bw_g; wi++) {
+                            if (K[wi] != 0 || (G[wi] & ~LO[wi]) != 0) { const_live = false; break; }
+                        }
+                    }
+                    if (const_live) {
+                        uint32_t gmask = 0;
+                        for (size_t wi = 0; wi < bw_g; wi++) {
+                            uint64_t w = LO[wi] & cs_glob[wi];
+                            while (w) {
+                                uint32_t g = (uint32_t)(wi * 64u) + ra_ctz64(w);
+                                w &= w - 1;
+                                gmask |= (1u << (uint32_t)home_pk[glob_vi[g]]);
+                            }
+                        }
+                        for (uint32_t c = c0; c < c1; c++) {
+                            uint32_t cp = call_pos_arr[c];
+                            uint32_t mask = gmask;
+                            for (uint32_t vi = v0; vi < v1; vi++) {
+                                if (glob_id[vi] != UINT32_MAX) continue;
+                                if (!crosses[vi] || home_pk[vi] < 0 || home_pk[vi] >= T->ncaller) continue;
+                                if (def_pos[vi] < A64_DEFP(cp) && last_use[vi] > A64_USEP(cp))
+                                    mask |= (1u << (uint32_t)home_pk[vi]);
+                            }
+                            if (mask) {
+                                MLIR_OpHandle cop = MLIR_GetBlockOp(ctx, bk, (size_t)(cp - bfirst));
+                                sm_put(T->call_save_mask, (MLIR_ValueHandle)cop, (int32_t)mask);
+                                used_cs |= mask;
+                            }
+                        }
+                    } else {
+                        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                        uint32_t fci = first_call[b];
+                        memcpy(live_g, LO, bw_g * sizeof(uint64_t));
+                        if (no > 0) {
+                            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                            for (size_t s = 0; s < ns; s++) {
+                                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, s);
+                                for (size_t k = 0; k < nso; k++) {
+                                    uint32_t vi;
+                                    if (RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, term, s, k), &vi) &&
+                                        glob_id[vi] != UINT32_MAX) a64_bs_set(live_g, glob_id[vi]);
+                                }
+                            }
+                        }
+                        uint32_t c_idx = c1;
+                        uint32_t next_call_i = call_pos_arr[c_idx - 1] - bfirst;
+                        for (size_t ii = no; ii-- > (size_t)fci; ) {
+                            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, ii);
+                            if (ra_is_folded(T, ctx, op)) continue;
+                            if (T->remat_skip && MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_GEP &&
+                                MLIR_GetOpNumResults(ctx, op) == 1) {
+                                int32_t dmy = 0;
+                                if (sm_get_fast(T->remat_skip, MLIR_GetOpResult(ctx, op, 0), &dmy)) continue;
+                            }
+                            if (ii == (size_t)next_call_i) {
+                                uint32_t rg = UINT32_MAX;
+                                if (MLIR_GetOpNumResults(ctx, op)) {
+                                    uint32_t rvi;
+                                    if (RA_VMAP_GET(MLIR_GetOpResult(ctx, op, 0), &rvi))
+                                        rg = glob_id[rvi];
+                                }
+                                bool had_rg = (rg != UINT32_MAX && a64_bs_test(live_g, rg));
+                                if (had_rg) a64_bs_clear(live_g, rg);
+                                uint32_t mask = 0;
+                                for (size_t wi = 0; wi < bw_g; wi++) {
+                                    uint64_t w = live_g[wi] & cs_glob[wi];
+                                    while (w) {
+                                        uint32_t g = (uint32_t)(wi * 64u) + ra_ctz64(w);
+                                        w &= w - 1;
+                                        mask |= (1u << (uint32_t)home_pk[glob_vi[g]]);
+                                    }
+                                }
+                                if (had_rg) a64_bs_set(live_g, rg);
+                                uint32_t cp = call_pos_arr[c_idx - 1];
+                                for (uint32_t vi = v0; vi < v1; vi++) {
+                                    if (glob_id[vi] != UINT32_MAX) continue;
+                                    if (!crosses[vi] || home_pk[vi] < 0 || home_pk[vi] >= T->ncaller) continue;
+                                    if (def_pos[vi] < A64_DEFP(cp) && last_use[vi] > A64_USEP(cp))
+                                        mask |= (1u << (uint32_t)home_pk[vi]);
+                                }
+                                if (mask) {
+                                    sm_put(T->call_save_mask, (MLIR_ValueHandle)op, (int32_t)mask);
+                                    used_cs |= mask;
+                                }
+                                c_idx--;
+                                if (c_idx > c0) next_call_i = call_pos_arr[c_idx - 1] - bfirst;
+                                else next_call_i = UINT32_MAX;
+                            }
+                            size_t nr = MLIR_GetOpNumResults(ctx, op);
+                            for (size_t r = 0; r < nr; r++) {
+                                uint32_t vi;
+                                if (RA_VMAP_GET(MLIR_GetOpResult(ctx, op, r), &vi) &&
+                                    glob_id[vi] != UINT32_MAX) a64_bs_clear(live_g, glob_id[vi]);
+                            }
+                            size_t nop = MLIR_GetOpNumOperands(ctx, op);
+                            for (size_t k = 0; k < nop; k++) {
+                                MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, op, k);
+                                if (T->remat_skip) {
+                                    int32_t dmy = 0;
+                                    for (int hop = 0; hop < 4 && sm_get_fast(T->remat_skip, ov, &dmy); hop++) {
+                                        MLIR_OpHandle gd = MLIR_GetValueDefiningOp(ctx, ov);
+                                        if (gd != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, gd) == OP_TYPE_LLVM_GEP)
+                                            ov = MLIR_GetOpOperand(ctx, gd, 0);
+                                        else break;
+                                    }
+                                }
+                                uint32_t vi;
+                                if (RA_VMAP_GET(ov, &vi) &&
+                                    glob_id[vi] != UINT32_MAX) a64_bs_set(live_g, glob_id[vi]);
+                            }
+                            MLIR_ValueHandle mbase, midx;
+                            if (ra_memfuse(T, ctx, op, &mbase, &midx)) {
+                                uint32_t vi;
+                                if (RA_VMAP_GET(mbase, &vi) && glob_id[vi] != UINT32_MAX)
+                                    a64_bs_set(live_g, glob_id[vi]);
+                                if (RA_VMAP_GET(midx, &vi) && glob_id[vi] != UINT32_MAX)
+                                    a64_bs_set(live_g, glob_id[vi]);
+                            }
+                            MLIR_ValueHandle sfx;
+                            if (ra_shiftfuse(T, ctx, op, &sfx)) {
+                                uint32_t vi;
+                                if (RA_VMAP_GET(sfx, &vi) && glob_id[vi] != UINT32_MAX)
+                                    a64_bs_set(live_g, glob_id[vi]);
+                            }
+                        }
+                    }
+                } else {
+                    for (uint32_t c = c0; c < c1; c++) {
+                        uint32_t cp = call_pos_arr[c];
+                        uint32_t mask = 0;
+                        for (uint32_t vi = v0; vi < v1; vi++) {
+                            if (!crosses[vi] || home_pk[vi] < 0 || home_pk[vi] >= T->ncaller) continue;
+                            if (def_pos[vi] < A64_DEFP(cp) && last_use[vi] > A64_USEP(cp))
+                                mask |= (1u << (uint32_t)home_pk[vi]);
+                        }
+                        if (mask) {
+                            MLIR_OpHandle cop = MLIR_GetBlockOp(ctx, bk, (size_t)(cp - bfirst));
+                            sm_put(T->call_save_mask, (MLIR_ValueHandle)cop, (int32_t)mask);
+                            used_cs |= mask;
+                        }
+                    }
+                }
+            }
+            if (T->call_save_used) *T->call_save_used = used_cs;
+        }
+    }
+    #undef RA_VMAP_GET
 
     // --- 4b. Assign frame slots to spilled values with min-heap reuse. ---
     int32_t next_slot = 0;

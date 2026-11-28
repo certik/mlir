@@ -1529,6 +1529,18 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
     }
     // calls
     case OP_TYPE_LLVM_CALL: case OP_TYPE_FUNC_CALL: {
+        int32_t cs_mask = 0;
+        if (F->has_call_save) sm_get(&F->call_save_mask, (MLIR_ValueHandle)op, &cs_mask);
+        if (cs_mask) {
+            for (int pk = 0; pk < F->call_save_ncaller; pk++)
+                if (cs_mask & (1 << pk)) store_rbp(F, F->call_save_off[pk], F->call_save_reg[pk], 1);
+        }
+        #define X64_RESTORE_CALL_SAVES() do { \
+            if (cs_mask) { \
+                for (int _pk = 0; _pk < F->call_save_ncaller; _pk++) \
+                    if (cs_mask & (1 << _pk)) load_rbp(F, F->call_save_reg[_pk], F->call_save_off[_pk], 1); \
+            } \
+        } while (0)
         string callee = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE));
         if (!callee.size) callee = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
         bool is_indirect = (callee.size == 0);
@@ -1545,6 +1557,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 emit_parallel_arg_moves(F, op, 0, 6);
                 emit_direct_call(F, callee, refs);
                 x64_emit1(F, OP_TYPE_X64_ADD_RSP, 8);        // add rsp, 8
+                X64_RESTORE_CALL_SAVES();
                 if (MLIR_GetOpNumResults(ctx, op) == 1)
                     store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                 return;
@@ -1580,14 +1593,17 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                             load_mem_disp(F, R11, RSI, 1, false, off);
                             store_mem_disp(F, RDI, R11, 1, off);
                         }
+                        if (MLIR_GetOpNumResults(ctx, op) == 1) mov_rr(F, RAX, RDI, 1);
+                        X64_RESTORE_CALL_SAVES();
                         if (MLIR_GetOpNumResults(ctx, op) == 1)
-                            store_val(F, MLIR_GetOpResult(ctx, op, 0), RDI);
+                            store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                         return;
                     }
                     emit_parallel_arg_moves(F, op, 0, 3);    // RDI=dst, RSI=src, RDX=n
                     mov_rr(F, RAX, RDI, 1);                  // return original dst
                     mov_rr(F, RCX, RDX, 1);                  // count = n
                     x64_emit0(F, OP_TYPE_X64_REP_MOVSB);
+                    X64_RESTORE_CALL_SAVES();
                     if (MLIR_GetOpNumResults(ctx, op) == 1)
                         store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                     return;
@@ -1606,8 +1622,10 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                         if (rem >= 4)    { store_mem_disp(F, RDI, R11, 4, off); off += 4; rem -= 4; }
                         if (rem >= 2)    { store_mem_disp(F, RDI, R11, 2, off); off += 2; rem -= 2; }
                         if (rem >= 1)    { store_mem_disp(F, RDI, R11, 1, off); }
+                        if (MLIR_GetOpNumResults(ctx, op) == 1) mov_rr(F, RAX, RDI, 1);
+                        X64_RESTORE_CALL_SAVES();
                         if (MLIR_GetOpNumResults(ctx, op) == 1)
-                            store_val(F, MLIR_GetOpResult(ctx, op, 0), RDI);
+                            store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                         return;
                     }
                     emit_parallel_arg_moves(F, op, 0, 3);    // RDI=dst, RSI=c, RDX=n
@@ -1616,6 +1634,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     mov_rr(F, RCX, RDX, 1);                  // count = n
                     x64_emit0(F, OP_TYPE_X64_REP_STOSB);
                     mov_rr(F, RAX, R11, 1);                  // return original dst
+                    X64_RESTORE_CALL_SAVES();
                     if (MLIR_GetOpNumResults(ctx, op) == 1)
                         store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                     return;
@@ -1633,6 +1652,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     load_mem_disp(F, RCX, RSI, 1, false, -1);
                     alu_rr(F, 0x29, RAX, RCX, 0);            // sub eax, ecx
                     x64_emit1(F, OP_TYPE_X64_LABEL, (int64_t)lbl_done);
+                    X64_RESTORE_CALL_SAVES();
                     if (MLIR_GetOpNumResults(ctx, op) == 1)
                         store_val_w(F, MLIR_GetOpResult(ctx, op, 0), RAX, 0);
                     return;
@@ -1655,6 +1675,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 x64_emit1(F, OP_TYPE_X64_JMP, (int64_t)lbl_lp);
                 x64_emit1(F, OP_TYPE_X64_LABEL, (int64_t)lbl_dn);
                 alu_rr(F, 0x29, RAX, RCX, 0);                // sub eax, ecx
+                X64_RESTORE_CALL_SAVES();
                 if (MLIR_GetOpNumResults(ctx, op) == 1)
                     store_val_w(F, MLIR_GetOpResult(ctx, op, 0), RAX, 0);
                 return;
@@ -1668,6 +1689,7 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                 // len = (~rcx) - 1 = (-rcx) - 2  ->  mov rax, -2; sub rax, rcx
                 mov_ri(F, RAX, -2, 1);
                 alu_rr(F, 0x29 /*sub*/, RAX, RCX, 1);
+                X64_RESTORE_CALL_SAVES();
                 if (MLIR_GetOpNumResults(ctx, op) == 1)
                     store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                 return;
@@ -1687,6 +1709,8 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
             uint32_t cleanup = (uint32_t)((nstack + pad) * 8);   // pop stack args + pad
             x64_emit1(F, OP_TYPE_X64_ADD_RSP, (int64_t)cleanup);
         }
+        X64_RESTORE_CALL_SAVES();
+        #undef X64_RESTORE_CALL_SAVES
         if (MLIR_GetOpNumResults(ctx, op) == 1)
             store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
         return;
@@ -4406,12 +4430,19 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             x64_build_remat_skip(ctx, reg, nb, &F.gep_skip, &F.has_gep_skip);
             if (F.has_gep_skip) T.remat_skip = &F.gep_skip;
         }
+        uint32_t cs_used = 0;
+        if (!use_fast && g_x64_opt_level >= 2) {
+            F.call_save_mask.arena = MLIR_GetArenaAllocator(ctx);
+            T.call_save_mask = &F.call_save_mask;
+            T.call_save_used = &cs_used;
+        }
         uint32_t um = use_fast
             ? mlir_regalloc_fast(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T)
             : mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
         if (um != RA_BAIL) F.fast_ra = use_fast;
         if (um == RA_BAIL) {
             F.has_gep_skip = false;
+            cs_used = 0;
             memset(&F.rm, 0, sizeof(F.rm));
             F.rm.arena = MLIR_GetArenaAllocator(ctx);
             memset(&sm_spill, 0, sizeof(sm_spill));
@@ -4420,6 +4451,11 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             um = mlir_regalloc_cfg(ctx, reg, nb, &F.rm, &T);
         } else {
             used_global = true;
+            if (cs_used != 0) {
+                F.has_call_save = true;
+                F.call_save_ncaller = T.ncaller;
+                for (int pk = 0; pk < T.ncaller; pk++) F.call_save_reg[pk] = T.pool[pk];
+            }
         }
         F.used_mask = um;
         for (int k = 0; k < T.npool - T.ncaller; k++)
@@ -4497,6 +4533,12 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
     //     which overflowed the 8 MiB stack in recursive code (the wasm lifter's
     //     lower_op <-> lower_region) of the self-hosted ELF compiler. ---
     int32_t cur = nslots * 8;
+    if (F.has_call_save) {
+        for (int pk = 0; pk < F.call_save_ncaller; pk++) {
+            cur += 8;
+            F.call_save_off[pk] = cur;
+        }
+    }
     uint32_t max_edge = 0;
     if (used_global) {
         F.spill = sm_spill;

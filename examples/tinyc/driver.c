@@ -1875,6 +1875,7 @@ static int tinyc_main(void) {
             mlir_llvm_simplify_cfg(ctx, module);
             if (opt_level >= 2) {
                 mlir_llvm_inline(ctx, module);
+                mlir_llvm_mem2reg_ex(ctx, module, true);
                 mlir_llvm_tre(ctx, module);
                 mlir_llvm_constfold(ctx, module);
                 mlir_llvm_simplify_cfg(ctx, module);

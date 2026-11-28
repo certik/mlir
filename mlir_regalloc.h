@@ -81,6 +81,8 @@ typedef struct RegTarget {
     uint8_t pool[RA_MAXPOOL];
     SlotMap *memfuse, *memspine, *shiftfuse;
     SlotMap *remat_skip;
+    SlotMap *call_save_mask;    // optional: (ValueHandle)call_op -> live caller-saved pool bitmask
+    uint32_t *call_save_used;   // optional: union of all masks written to call_save_mask
     bool remat_alloca;
 } RegTarget;
 
