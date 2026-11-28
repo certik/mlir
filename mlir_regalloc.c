@@ -977,7 +977,13 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             MLIR_BlockHandle bk = blk_h[b];
             uint32_t op_pos = block_first[b];
             uint64_t w = loop_depth ? A64_USE_WEIGHT_AT(loop_depth[b]) : 1ull;
-            if (hdr_in && hdr_in[b] > 1u) w *= (uint64_t)hdr_in[b];
+            if (hdr_in) {
+                uint32_t hi = hdr_in[b];
+                if (hi < 8u && b > 0 && hdr_in[b - 1] >= 8u) hi = hdr_in[b - 1];
+                if (hi < 8u && b > 1 && hdr_in[b - 2] >= 8u) hi = hdr_in[b - 2];
+                if (hi >= 8u) w *= 256ull;
+                else if (hi > 1u) w *= (uint64_t)hi;
+            }
             size_t no = MLIR_GetBlockNumOps(ctx, bk);
             for (size_t i = 0; i < no; i++) {
                 MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
