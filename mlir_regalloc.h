@@ -80,6 +80,7 @@ typedef struct RegTarget {
     int nhome;
     uint8_t pool[RA_MAXPOOL];
     SlotMap *memfuse, *memspine, *shiftfuse;
+    SlotMap *remat_skip;
     bool remat_alloca;
 } RegTarget;
 
