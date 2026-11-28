@@ -2606,6 +2606,78 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                             MLIR_ValueHandle bv = cf_unwrap_bool_i1(ctx, a0);
                             if (bv != MLIR_INVALID_HANDLE) repl = bv;
                         }
+                        // Impossible-constant block-arg folding:
+                        // If `a0` is a block arg of `b_def > 0` whose incoming values
+                        // (recursively through up to 2 pass-through block args) are ONLY
+                        // `a0` itself or integer constants != c1, then `a0 == c1` is always false!
+                        if (repl == MLIR_INVALID_HANDLE && (pred == 0 || pred == 1) &&
+                            MLIR_GetValueDefiningOp(ctx, a0) == MLIR_INVALID_HANDLE && nb <= 64) {
+                            MLIR_BlockHandle def_b = MLIR_INVALID_HANDLE;
+                            size_t def_ai = 0;
+                            for (size_t bb = 1; bb < nb && def_b == MLIR_INVALID_HANDLE; bb++) {
+                                MLIR_BlockHandle tb = MLIR_GetRegionBlock(ctx, reg, bb);
+                                size_t tna = MLIR_GetBlockNumArgs(ctx, tb);
+                                for (size_t a = 0; a < tna; a++) {
+                                    if (MLIR_GetBlockArg(ctx, tb, a) == a0) { def_b = tb; def_ai = a; break; }
+                                }
+                            }
+                            if (def_b != MLIR_INVALID_HANDLE) {
+                                // BFS over incoming phi values (max 8 visited block args).
+                                MLIR_BlockHandle q_blk[8]; size_t q_ai[8];
+                                size_t qh = 0, qt = 0;
+                                q_blk[qt] = def_b; q_ai[qt] = def_ai; qt++;
+                                bool never_eq = true;
+                                uint64_t target_u = (uint64_t)cf_mask(c1, w1);
+                                while (qh < qt && never_eq) {
+                                    MLIR_BlockHandle cur_b = q_blk[qh];
+                                    size_t cur_ai = q_ai[qh];
+                                    qh++;
+                                    size_t cur_na = MLIR_GetBlockNumArgs(ctx, cur_b);
+                                    for (size_t pb = 0; pb < nb && never_eq; pb++) {
+                                        MLIR_BlockHandle pblk = MLIR_GetRegionBlock(ctx, reg, pb);
+                                        MLIR_OpHandle pt = MLIR_GetBlockTerminator(ctx, pblk);
+                                        if (pt == MLIR_INVALID_HANDLE) continue;
+                                        size_t pns = MLIR_GetOpNumSuccessors(ctx, pt);
+                                        for (size_t ps = 0; ps < pns && never_eq; ps++) {
+                                            if (MLIR_GetOpSuccessor(ctx, pt, ps) != cur_b) continue;
+                                            if (MLIR_GetOpNumSuccessorOperands(ctx, pt, ps) != cur_na) { never_eq = false; break; }
+                                            MLIR_ValueHandle iv = MLIR_GetOpSuccessorOperand(ctx, pt, ps, cur_ai);
+                                            if (iv == a0) continue;
+                                            int64_t ic = 0;
+                                            if (cf_get_int_const(ctx, iv, &ic, NULL)) {
+                                                if ((uint64_t)cf_mask(ic, w1) == target_u) never_eq = false;
+                                            } else if (MLIR_GetValueDefiningOp(ctx, iv) == MLIR_INVALID_HANDLE) {
+                                                MLIR_BlockHandle nb_b = MLIR_INVALID_HANDLE; size_t nb_ai = 0;
+                                                for (size_t xb = 1; xb < nb && nb_b == MLIR_INVALID_HANDLE; xb++) {
+                                                    MLIR_BlockHandle xblk = MLIR_GetRegionBlock(ctx, reg, xb);
+                                                    size_t xna = MLIR_GetBlockNumArgs(ctx, xblk);
+                                                    for (size_t xa = 0; xa < xna; xa++)
+                                                        if (MLIR_GetBlockArg(ctx, xblk, xa) == iv) { nb_b = xblk; nb_ai = xa; break; }
+                                                }
+                                                if (nb_b == MLIR_INVALID_HANDLE) { never_eq = false; break; }
+                                                bool seen_q = false;
+                                                for (size_t qi = 0; qi < qt; qi++)
+                                                    if (q_blk[qi] == nb_b && q_ai[qi] == nb_ai) { seen_q = true; break; }
+                                                if (!seen_q) {
+                                                    if (qt >= 8) { never_eq = false; break; }
+                                                    q_blk[qt] = nb_b; q_ai[qt] = nb_ai; qt++;
+                                                }
+                                            } else {
+                                                never_eq = false;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (never_eq) {
+                                    int64_t rv = (pred == 1) ? 1 : 0;
+                                    MLIR_ValueHandle cv = cf_make_int_const(ctx, bk, i, rty, rv);
+                                    MLIR_ReplaceAllUsesOfValue(ctx, res, cv);
+                                    MLIR_DetachOp(ctx, op);
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
                         // Bit-test folding: icmp eq/ne (and (ashr/lshr x, K), M), 0
                         // -> icmp eq/ne (and x, M << K), 0 (turns `sar; and; test` into `test $imm`!).
                         if (repl == MLIR_INVALID_HANDLE && (pred == 0 || pred == 1) && c1 == 0) {
@@ -3010,6 +3082,70 @@ static void const_blockarg_thread_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                     MLIR_OpHandle nbr = MLIR_CreateOpFromSpec(ctx, &bsp);
                     MLIR_InsertBlockOpAtIndex(ctx, pblk, nbr, MLIR_GetBlockNumOps(ctx, pblk) - 1);
                     MLIR_DetachOp(ctx, pterm);
+                }
+                // Also thread 2-hop pass-throughs: `P -> M(K)` where `M(%m)` has <= 8
+                // clonable ops and ends in `br ^L(%m)` (e.g. CoreMark bb37 -> bb41 -> bb42(1)).
+                if (texit != MLIR_INVALID_HANDLE) {
+                    for (size_t mi = 1; mi < nb; mi++) {
+                        if (mi == li || mi == h) continue;
+                        MLIR_BlockHandle mblk = blks[mi];
+                        if (MLIR_GetBlockNumArgs(ctx, mblk) != 1) continue;
+                        size_t mno = MLIR_GetBlockNumOps(ctx, mblk);
+                        if (mno < 2 || mno > 8) continue;
+                        MLIR_OpHandle mterm = MLIR_GetBlockOp(ctx, mblk, mno - 1);
+                        if (MLIR_GetOpType(ctx, mterm) != OP_TYPE_LLVM_BR ||
+                            MLIR_GetOpSuccessor(ctx, mterm, 0) != lblk ||
+                            MLIR_GetOpNumSuccessorOperands(ctx, mterm, 0) != 1) continue;
+                        MLIR_ValueHandle marg = MLIR_GetBlockArg(ctx, mblk, 0);
+                        if (MLIR_GetOpSuccessorOperand(ctx, mterm, 0, 0) != marg) continue;
+                        bool m_ok = true;
+                        for (size_t i = 0; i + 1 < mno; i++) {
+                            MLIR_OpHandle mo = MLIR_GetBlockOp(ctx, mblk, i);
+                            MLIR_OpType mot = MLIR_GetOpType(ctx, mo);
+                            if (MLIR_GetOpNumRegions(ctx, mo) > 0 || MLIR_GetOpNumOperands(ctx, mo) > 16 ||
+                                MLIR_GetOpNumResults(ctx, mo) > 1 || MLIR_GetOpNumAttributes(ctx, mo) > 8 ||
+                                mot == OP_TYPE_LLVM_CALL || mot == OP_TYPE_FUNC_CALL || mot == OP_TYPE_LLVM_ALLOCA) {
+                                m_ok = false; break;
+                            }
+                        }
+                        if (!m_ok) continue;
+                        for (size_t p = 0; p < nb; p++) {
+                            if (p == mi || p == li) continue;
+                            MLIR_BlockHandle pblk = blks[p];
+                            MLIR_OpHandle pterm = MLIR_GetBlockTerminator(ctx, pblk);
+                            if (pterm == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, pterm) != OP_TYPE_LLVM_BR) continue;
+                            if (MLIR_GetOpSuccessor(ctx, pterm, 0) != mblk ||
+                                MLIR_GetOpNumSuccessorOperands(ctx, pterm, 0) != 1) continue;
+                            int64_t cv = 0;
+                            if (!cf_get_int_const(ctx, MLIR_GetOpSuccessorOperand(ctx, pterm, 0, 0), &cv, NULL))
+                                continue;
+                            if (cf_mask(cv, Kw) != cf_mask(K, Kw)) continue;
+                            size_t pins = MLIR_GetBlockNumOps(ctx, pblk) - 1;
+                            MLIR_ValueHandle old_v[16], new_v[16];
+                            size_t n_map = 0;
+                            old_v[n_map] = marg;
+                            new_v[n_map] = MLIR_GetOpSuccessorOperand(ctx, pterm, 0, 0);
+                            n_map++;
+                            for (size_t i = 0; i + 1 < mno; i++) {
+                                MLIR_OpHandle mo = MLIR_GetBlockOp(ctx, mblk, i);
+                                MLIR_OpHandle cl = unroll_clone_op(ctx, mo, old_v, new_v, n_map);
+                                MLIR_InsertBlockOpAtIndex(ctx, pblk, cl, pins++);
+                                if (MLIR_GetOpNumResults(ctx, mo) == 1) {
+                                    old_v[n_map] = MLIR_GetOpResult(ctx, mo, 0);
+                                    new_v[n_map] = MLIR_GetOpResult(ctx, cl, 0);
+                                    n_map++;
+                                }
+                            }
+                            MLIR_OpSpec bsp; memset(&bsp, 0, sizeof(bsp));
+                            bsp.type = OP_TYPE_LLVM_BR;
+                            bsp.successors = &texit; bsp.n_successors = 1;
+                            uint32_t zero_cnt = 0;
+                            bsp.successor_operand_counts = &zero_cnt;
+                            MLIR_OpHandle nbr = MLIR_CreateOpFromSpec(ctx, &bsp);
+                            MLIR_InsertBlockOpAtIndex(ctx, pblk, nbr, pins);
+                            MLIR_DetachOp(ctx, pterm);
+                        }
+                    }
                 }
             }
         }

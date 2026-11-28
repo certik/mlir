@@ -1298,14 +1298,15 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         int32_t disp = 0;
         if (F->has_gep_skip) {
             int32_t dmy = 0;
-            if (sm_get(&F->gep_skip, addr, &dmy)) {
+            int64_t tot_disp = 0;
+            for (int hop = 0; hop < 4 && sm_get(&F->gep_skip, addr, &dmy); hop++) {
                 MLIR_OpHandle gdef = MLIR_GetValueDefiningOp(ctx, addr);
                 int64_t goff = 0;
-                if (gdef != MLIR_INVALID_HANDLE && x64_gep_const_offset(ctx, gdef, &goff)) {
-                    disp = (int32_t)goff;
-                    addr = MLIR_GetOpOperand(ctx, gdef, 0);
-                }
+                if (gdef == MLIR_INVALID_HANDLE || !x64_gep_const_offset(ctx, gdef, &goff)) break;
+                tot_disp += goff;
+                addr = MLIR_GetOpOperand(ctx, gdef, 0);
             }
+            disp = (int32_t)tot_disp;
         }
         uint8_t xD;
         if (fp_bytes(ctx, r) && val_in_xmm(F, r, &xD)) {
@@ -1341,14 +1342,15 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         int32_t disp = 0;
         if (F->has_gep_skip) {
             int32_t dmy = 0;
-            if (sm_get(&F->gep_skip, addr, &dmy)) {
+            int64_t tot_disp = 0;
+            for (int hop = 0; hop < 4 && sm_get(&F->gep_skip, addr, &dmy); hop++) {
                 MLIR_OpHandle gdef = MLIR_GetValueDefiningOp(ctx, addr);
                 int64_t goff = 0;
-                if (gdef != MLIR_INVALID_HANDLE && x64_gep_const_offset(ctx, gdef, &goff)) {
-                    disp = (int32_t)goff;
-                    addr = MLIR_GetOpOperand(ctx, gdef, 0);
-                }
+                if (gdef == MLIR_INVALID_HANDLE || !x64_gep_const_offset(ctx, gdef, &goff)) break;
+                tot_disp += goff;
+                addr = MLIR_GetOpOperand(ctx, gdef, 0);
             }
+            disp = (int32_t)tot_disp;
         }
         uint8_t xS;
         if (fp_bytes(ctx, val) && val_in_xmm(F, val, &xS)) {
@@ -3760,10 +3762,12 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
                         size_t i1 = x64_next_live(ctx, blk, i + 1, n_ops);
                         MLIR_OpHandle pre_op = MLIR_INVALID_HANDLE;
                         MLIR_OpHandle pre2_op = MLIR_INVALID_HANDLE;
-                        if (i1 < n_ops && MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, i1)) == OP_TYPE_X64_MOVSX) {
+                        MLIR_OpType pt0 = (i1 < n_ops) ? MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, i1)) : OP_TYPE_X64_NOP;
+                        if (i1 < n_ops && (pt0 == OP_TYPE_X64_MOVSX || pt0 == OP_TYPE_X64_LOAD_MEM || pt0 == OP_TYPE_X64_LOAD_MEM_DISP)) {
                             pre_op = MLIR_GetBlockOp(ctx, blk, i1);
                             i1 = x64_next_live(ctx, blk, i1 + 1, n_ops);
-                            if (i1 < n_ops && MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, i1)) == OP_TYPE_X64_LOAD_MEM_SIB) {
+                            if (pt0 == OP_TYPE_X64_MOVSX && i1 < n_ops &&
+                                MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blk, i1)) == OP_TYPE_X64_LOAD_MEM_SIB) {
                                 pre2_op = MLIR_GetBlockOp(ctx, blk, i1);
                                 i1 = x64_next_live(ctx, blk, i1 + 1, n_ops);
                             }
@@ -3855,6 +3859,30 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         }
         memset(g_lbl_seen, 0, need);
     }
+    // Hoist `lea jtab(%rip), %jtab_reg` into prologue when the function has a
+    // single jump table, no calls, and an unused caller-saved GP register.
+    int jtab_reg = -1;
+    if (g_x64_opt_level >= 2 && F->n_jtabs == 1 && !F->fast_ra) {
+        uint16_t fn_regs = 0;
+        bool has_call = false;
+        for (size_t i = 0; i < n_ops; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blk, i);
+            MLIR_OpType ty = MLIR_GetOpType(ctx, op);
+            if (ty == OP_TYPE_X64_CALL_SYM || ty == OP_TYPE_X64_CALL_REG ||
+                ty == OP_TYPE_X64_REP_MOVSB || ty == OP_TYPE_X64_REP_STOSB ||
+                ty == OP_TYPE_X64_REPE_CMPSB || ty == OP_TYPE_X64_REPNE_SCASB) {
+                has_call = true; break;
+            }
+            uint16_t rr = 0, ww = 0;
+            if (x64_op_regs(ctx, op, &rr, &ww)) fn_regs |= (uint16_t)(rr | ww);
+        }
+        if (!has_call) {
+            static const uint8_t cand_regs[6] = { R9, R8, R10, RSI, RDI, RDX };
+            for (int c = 0; c < 6; c++) {
+                if ((fn_regs & (1u << cand_regs[c])) == 0) { jtab_reg = (int)cand_regs[c]; break; }
+            }
+        }
+    }
     F->x64_blk = MLIR_INVALID_HANDLE; // switch low-level helpers to direct byte emission
     F->n_fix = 0;
 
@@ -3878,6 +3906,14 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             }
             g_lbl_off[(size_t)id] = here(F);
             g_lbl_seen[(size_t)id] = 1;
+            if (id == 0 && jtab_reg >= 0) {
+                // lea jtab_reg, [rip + disp32]
+                rex(F, 1, (uint8_t)jtab_reg, 0, 0);
+                eb(F, 0x8D);
+                eb(F, (uint8_t)(0x05 | (((uint8_t)jtab_reg & 7) << 3)));
+                uint32_t fld = here(F); e32(F, 0);
+                F->jtabs[0].lea_disp_off = fld;
+            }
             break;
         }
         case OP_TYPE_X64_PUSH_R: {
@@ -4221,12 +4257,22 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
                 rot_cmp[lbl] != MLIR_INVALID_HANDLE && g_lbl_seen[rot_body[lbl]]) {
                 // Bottom-test loop rotation: emit `[movsx] ; cmp/test ; jcc^1 BODY ; [jmp EXIT]`
                 if (rot_pre && rot_pre[lbl] != MLIR_INVALID_HANDLE) {
+                    MLIR_OpType rpt = MLIR_GetOpType(ctx, rot_pre[lbl]);
                     uint64_t pv = (uint64_t)MLIR_GetOpInlineI64(ctx, rot_pre[lbl]);
-                    uint8_t pd = (uint8_t)(pv & 15), ps = (uint8_t)((pv >> 4) & 15);
-                    int pbits = (int)((pv >> 8) & 0xff);
-                    if (pbits == 32)      { rex(F, 1, pd, 0, ps); eb(F, 0x63); modrm(F, 3, pd, ps); }
-                    else if (pbits == 16) { rex(F, 1, pd, 0, ps); eb(F, 0x0F); eb(F, 0xBF); modrm(F, 3, pd, ps); }
-                    else                  { rex(F, 1, pd, 0, ps); eb(F, 0x0F); eb(F, 0xBE); modrm(F, 3, pd, ps); }
+                    if (rpt == OP_TYPE_X64_MOVSX) {
+                        uint8_t pd = (uint8_t)(pv & 15), ps = (uint8_t)((pv >> 4) & 15);
+                        int pbits = (int)((pv >> 8) & 0xff);
+                        if (pbits == 32)      { rex(F, 1, pd, 0, ps); eb(F, 0x63); modrm(F, 3, pd, ps); }
+                        else if (pbits == 16) { rex(F, 1, pd, 0, ps); eb(F, 0x0F); eb(F, 0xBF); modrm(F, 3, pd, ps); }
+                        else                  { rex(F, 1, pd, 0, ps); eb(F, 0x0F); eb(F, 0xBE); modrm(F, 3, pd, ps); }
+                    } else if (rpt == OP_TYPE_X64_LOAD_MEM) {
+                        load_mem(F, (uint8_t)(pv & 15), (uint8_t)((pv >> 4) & 15),
+                                 (int)((pv >> 8) & 15), ((pv >> 12) & 1) != 0);
+                    } else if (rpt == OP_TYPE_X64_LOAD_MEM_DISP) {
+                        load_mem_disp(F, (uint8_t)(pv & 15), (uint8_t)((pv >> 4) & 15),
+                                      (int)((pv >> 8) & 15), ((pv >> 12) & 1) != 0,
+                                      (int32_t)(uint32_t)(pv >> 32));
+                    }
                 }
                 if (rot_pre2 && rot_pre2[lbl] != MLIR_INVALID_HANDLE) {
                     uint64_t pv = (uint64_t)MLIR_GetOpInlineI64(ctx, rot_pre2[lbl]);
@@ -4336,6 +4382,18 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         }
         case OP_TYPE_X64_JTAB_DISPATCH: {
             size_t jid = (size_t)MLIR_GetOpInlineI64(ctx, op);
+            if (jid == 0 && jtab_reg >= 0) {
+                uint8_t jr = (uint8_t)jtab_reg;
+                // movsxd rax, DWORD PTR [jr + rax*4]
+                rex(F, 1, RAX, RAX, jr);
+                eb(F, 0x63);
+                modrm_mem_sib_disp(F, RAX, jr, RAX, 2, 0);
+                // add rax, jr
+                alu_rr(F, 0x01, RAX, jr, 1);
+                // jmp rax
+                eb(F, 0xFF); eb(F, 0xE0);
+                break;
+            }
             // lea rcx, [rip + disp32]
             eb(F, 0x48); eb(F, 0x8D); eb(F, 0x0D);
             uint32_t fld = here(F); e32(F, 0);
@@ -4819,9 +4877,11 @@ static void x64_build_remat_skip(MLIR_Context *ctx, MLIR_RegionHandle reg, size_
                     if (hk[s] == uv) {
                         uint32_t ci = hv[s];
                         if (kind[ci] == 1) {
-                            // GEP: allowed ONLY as LOAD op0 or STORE op1!
+                            // GEP: allowed as LOAD op0, STORE op1, or base (op0) of another const-offset GEP!
+                            int64_t child_off = 0;
                             bool ok = (ot == OP_TYPE_LLVM_LOAD && k == 0) ||
-                                      (ot == OP_TYPE_LLVM_STORE && k == 1);
+                                      (ot == OP_TYPE_LLVM_STORE && k == 1) ||
+                                      (ot == OP_TYPE_LLVM_GEP && k == 0 && x64_gep_const_offset(ctx, op, &child_off));
                             if (!ok) bad[ci] = 1;
                         } else {
                             // ICMP: allowed ONLY once, as COND_BR op0!
@@ -4852,6 +4912,46 @@ static void x64_build_remat_skip(MLIR_Context *ctx, MLIR_RegionHandle reg, size_
                 }
             }
         }
+    }
+    // Reject chains > 3 hops FIRST, then propagate `bad` from child GEPs to parent GEPs
+    // (matching the 4-hop limit in LOAD/STORE and mlir_regalloc remat_skip).
+    for (size_t i = 0; i < n_cand; i++) {
+        if (kind[i] != 1 || bad[i]) continue;
+        MLIR_ValueHandle cur = cand[i];
+        int hops = 0;
+        while (hops < 5) {
+            MLIR_OpHandle gop = MLIR_GetValueDefiningOp(ctx, cur);
+            if (gop == MLIR_INVALID_HANDLE) break;
+            uintptr_t pv = (uintptr_t)MLIR_GetOpOperand(ctx, gop, 0);
+            size_t s = (pv * 1099511628211ull) & hmask;
+            bool found = false;
+            while (hk[s]) {
+                if (hk[s] == pv && kind[hv[s]] == 1 && !bad[hv[s]]) { found = true; cur = cand[hv[s]]; break; }
+                s = (s + 1) & hmask;
+            }
+            if (!found) break;
+            hops++;
+        }
+        if (hops >= 4) bad[i] = 1;
+    }
+    for (int prop = 0; prop < 8; prop++) {
+        bool ch = false;
+        for (size_t i = 0; i < n_cand; i++) {
+            if (kind[i] != 1 || !bad[i]) continue;
+            MLIR_OpHandle gop = MLIR_GetValueDefiningOp(ctx, cand[i]);
+            if (gop == MLIR_INVALID_HANDLE) continue;
+            uintptr_t pv = (uintptr_t)MLIR_GetOpOperand(ctx, gop, 0);
+            size_t s = (pv * 1099511628211ull) & hmask;
+            while (hk[s]) {
+                if (hk[s] == pv) {
+                    uint32_t pi = hv[s];
+                    if (kind[pi] == 1 && !bad[pi]) { bad[pi] = 1; ch = true; }
+                    break;
+                }
+                s = (s + 1) & hmask;
+            }
+        }
+        if (!ch) break;
     }
 
     size_t n_good = 0;
