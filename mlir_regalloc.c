@@ -1622,6 +1622,143 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
     }
 
+    // --- 4.0b. Post-linear-scan exact bitset spill-rescue pass ---
+    // Linear scan uses contiguous intervals [first_pos..last_use], which over-estimates
+    // interference across mutually-exclusive switch/branch paths (e.g. luaV_execute,
+    // sqlite3VdbeExec). Using exact per-block liveness bitsets, rescue high-weight
+    // spilled values into any physical register whose live blocks are 100% disjoint!
+    if (bw_g && n_blocks > 1 && n_blocks <= 4096 && T->npool <= RA_MAXPOOL) {
+        size_t n_spilled = 0;
+        for (uint32_t vi = 0; vi < nv; vi++) {
+            if (home_pk[vi] < 0 && last_use[vi] > first_pos[vi]) n_spilled++;
+        }
+        if (n_spilled > 0) {
+            size_t nb_w = (n_blocks + 63u) / 64u;
+            uint64_t *reg_blks = (uint64_t *)calloc((size_t)T->npool * nb_w, sizeof(uint64_t));
+            uint64_t *v_blks   = (uint64_t *)malloc(nb_w * sizeof(uint64_t));
+            uint32_t *sp_list  = (uint32_t *)malloc(n_spilled * sizeof(uint32_t));
+            // Build predecessor CSR from succ_off / succ_idx so block-arg defs
+            // conservatively occupy their predecessor blocks (edge-copy safety).
+            uint32_t *pred_off = (uint32_t *)calloc(n_blocks + 1u, sizeof(uint32_t));
+            uint32_t n_edges = succ_off[n_blocks];
+            for (uint32_t e = 0; e < n_edges; e++) pred_off[succ_idx[e] + 1u]++;
+            for (size_t b = 0; b < n_blocks; b++) pred_off[b + 1u] += pred_off[b];
+            uint32_t *pred_idx = (uint32_t *)malloc((n_edges ? n_edges : 1u) * sizeof(uint32_t));
+            uint32_t *pred_cur = (uint32_t *)malloc(n_blocks * sizeof(uint32_t));
+            memcpy(pred_cur, pred_off, n_blocks * sizeof(uint32_t));
+            for (size_t b = 0; b < n_blocks; b++) {
+                for (uint32_t e = succ_off[b]; e < succ_off[b + 1]; e++) {
+                    uint32_t s = succ_idx[e];
+                    pred_idx[pred_cur[s]++] = (uint32_t)b;
+                }
+            }
+            free(pred_cur);
+
+            // Seed reg_blks[pk] with all already-allocated values.
+            size_t sp_n = 0;
+            for (uint32_t vi = 0; vi < nv; vi++) {
+                if (last_use[vi] <= first_pos[vi]) continue;
+                int8_t pk = home_pk[vi];
+                if (pk < 0) { sp_list[sp_n++] = vi; continue; }
+                uint64_t *rb = reg_blks + (size_t)pk * nb_w;
+                uint32_t db = def_blk[vi];
+                a64_bs_set(rb, db);
+                if (db > 0 && MLIR_GetValueDefiningOp(ctx, handle[vi]) == MLIR_INVALID_HANDLE) {
+                    for (uint32_t pe = pred_off[db]; pe < pred_off[db + 1]; pe++)
+                        a64_bs_set(rb, pred_idx[pe]);
+                }
+                uint32_t g = glob_id[vi];
+                if (g != UINT32_MAX) {
+                    size_t gw = g >> 6;
+                    uint64_t gbit = 1ull << (g & 63u);
+                    for (size_t b = 0; b < n_blocks; b++) {
+                        if ((live_in[b * bw_g + gw] & gbit) || (live_out[b * bw_g + gw] & gbit))
+                            a64_bs_set(rb, (uint32_t)b);
+                    }
+                }
+            }
+
+            // Heapsort sp_list by descending weight[vi] (no function pointers for C99/tinyC).
+            for (size_t i = sp_n / 2; i > 0; i--) {
+                size_t root = i - 1;
+                while (root * 2 + 1 < sp_n) {
+                    size_t ch = root * 2 + 1;
+                    if (ch + 1 < sp_n && weight[sp_list[ch + 1]] < weight[sp_list[ch]]) ch++;
+                    if (weight[sp_list[root]] <= weight[sp_list[ch]]) break;
+                    uint32_t tmp = sp_list[root]; sp_list[root] = sp_list[ch]; sp_list[ch] = tmp;
+                    root = ch;
+                }
+            }
+            for (size_t end = sp_n; end > 1; end--) {
+                uint32_t tmp = sp_list[0]; sp_list[0] = sp_list[end - 1]; sp_list[end - 1] = tmp;
+                size_t root = 0, lim = end - 1;
+                while (root * 2 + 1 < lim) {
+                    size_t ch = root * 2 + 1;
+                    if (ch + 1 < lim && weight[sp_list[ch + 1]] < weight[sp_list[ch]]) ch++;
+                    if (weight[sp_list[root]] <= weight[sp_list[ch]]) break;
+                    tmp = sp_list[root]; sp_list[root] = sp_list[ch]; sp_list[ch] = tmp;
+                    root = ch;
+                }
+            }
+
+            // Greedily assign each spilled value to a disjoint physical register.
+            for (size_t si = 0; si < sp_n; si++) {
+                uint32_t vi = sp_list[si];
+                bool callee_only = crosses[vi] != 0;
+                bool allow_cs_fallback = callee_only && is_dispatch_loop &&
+                                         T->call_save_mask && !env->linear_crosses &&
+                                         caller_mask && (weight[vi] > call_cross_w[vi] / 16ull);
+                memset(v_blks, 0, nb_w * sizeof(uint64_t));
+                uint32_t db = def_blk[vi];
+                a64_bs_set(v_blks, db);
+                if (db > 0 && MLIR_GetValueDefiningOp(ctx, handle[vi]) == MLIR_INVALID_HANDLE) {
+                    for (uint32_t pe = pred_off[db]; pe < pred_off[db + 1]; pe++)
+                        a64_bs_set(v_blks, pred_idx[pe]);
+                }
+                uint32_t g = glob_id[vi];
+                if (g != UINT32_MAX) {
+                    size_t gw = g >> 6;
+                    uint64_t gbit = 1ull << (g & 63u);
+                    for (size_t b = 0; b < n_blocks; b++) {
+                        if ((live_in[b * bw_g + gw] & gbit) || (live_out[b * bw_g + gw] & gbit))
+                            a64_bs_set(v_blks, (uint32_t)b);
+                    }
+                }
+                // Try preferred class first: caller-saved for non-crossing, callee-saved for crossing.
+                int8_t chosen = -1;
+                uint32_t masks[2];
+                int nmasks = 0;
+                if (!callee_only) {
+                    masks[nmasks++] = caller_mask;
+                    masks[nmasks++] = callee_mask;
+                } else {
+                    masks[nmasks++] = callee_mask;
+                    if (allow_cs_fallback) masks[nmasks++] = caller_mask;
+                }
+                for (int mi = 0; mi < nmasks && chosen < 0; mi++) {
+                    uint32_t m = masks[mi];
+                    while (m) {
+                        uint32_t pk = ra_ctz64((uint64_t)m);
+                        m &= m - 1u;
+                        const uint64_t *rb = reg_blks + (size_t)pk * nb_w;
+                        bool disj = true;
+                        for (size_t w = 0; w < nb_w; w++) {
+                            if (rb[w] & v_blks[w]) { disj = false; break; }
+                        }
+                        if (disj) { chosen = (int8_t)pk; break; }
+                    }
+                }
+                if (chosen >= 0) {
+                    home_pk[vi] = chosen;
+                    uint64_t *rb = reg_blks + (size_t)chosen * nb_w;
+                    for (size_t w = 0; w < nb_w; w++) rb[w] |= v_blks[w];
+                }
+            }
+
+            free(pred_idx); free(pred_off); free(sp_list); free(v_blks); free(reg_blks);
+        }
+    }
+
     // --- 4a. Populate per-call live caller-saved register masks if any call-crossing
     //         value was assigned a caller-saved register. ---
     if (T->call_save_mask && !env->linear_crosses && n_calls_tot > 0) {
@@ -1803,9 +1940,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             if (T->call_save_used) *T->call_save_used = used_cs;
         }
     }
-    #undef RA_VMAP_GET
-
-    // --- 4b. Assign frame slots to spilled values with min-heap reuse. ---
+    // --- 4b. Assign frame slots to spilled values (phi-coalescing + min-heap reuse). ---
     int32_t next_slot = 0;
     {
         size_t n_spills = 0;
@@ -1829,11 +1964,101 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         }
         if (n_spills > 0) {
             bool no_reuse = env->no_slot_reuse;
+            int32_t *sm_d = sm->dense;
+            // Phase 4b-1: Coalesce spilled block-arg copy pairs (e.g. loop header <-> latch
+            // spilled phi webs in sqlite3VdbeExec / luaV_execute) into shared stack slots
+            // whenever their exact live-block sets are 100% disjoint!
+            int32_t *coal_slot = NULL;
+            if (!no_reuse && bw_g && n_blocks > 1 && n_blocks <= 4096) {
+                size_t nb_w = (n_blocks + 63u) / 64u;
+                const int32_t max_coal = 256;
+                coal_slot = (int32_t *)malloc(nv * sizeof(int32_t));
+                for (uint32_t vi = 0; vi < nv; vi++) coal_slot[vi] = -1;
+                uint64_t *slot_blks = (uint64_t *)calloc((size_t)max_coal * nb_w, sizeof(uint64_t));
+                uint64_t *b_src = (uint64_t *)malloc(nb_w * sizeof(uint64_t));
+                uint64_t *b_dst = (uint64_t *)malloc(nb_w * sizeof(uint64_t));
+                for (size_t b = 0; b < n_blocks; b++) {
+                    MLIR_BlockHandle bk = blk_h[b];
+                    size_t no = MLIR_GetBlockNumOps(ctx, bk);
+                    if (no == 0) continue;
+                    MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+                    size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+                    for (size_t s = 0; s < ns; s++) {
+                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, s);
+                        if (nso == 0) continue;
+                        MLIR_BlockHandle tb = MLIR_GetOpSuccessor(ctx, term, s);
+                        for (size_t k = 0; k < nso; k++) {
+                            uint32_t svi, dvi;
+                            if (!RA_VMAP_GET(MLIR_GetOpSuccessorOperand(ctx, term, s, k), &svi)) continue;
+                            if (!RA_VMAP_GET(MLIR_GetBlockArg(ctx, tb, k), &dvi)) continue;
+                            if (svi == dvi) continue;
+                            if (home_pk[svi] >= 0 || home_pk[dvi] >= 0) continue;
+                            if (last_use[svi] <= first_pos[svi] || last_use[dvi] <= first_pos[dvi]) continue;
+                            int32_t ss = coal_slot[svi], ds = coal_slot[dvi];
+                            if (ss >= 0 && ds >= 0) continue;
+                            if (ss < 0 && ds < 0 && next_slot >= max_coal) continue;
+                            // Build exact live-block bitset for any unassigned endpoint.
+                            if (ss < 0) {
+                                memset(b_src, 0, nb_w * sizeof(uint64_t));
+                                a64_bs_set(b_src, def_blk[svi]);
+                                uint32_t gs = glob_id[svi];
+                                if (gs != UINT32_MAX) {
+                                    size_t gw = gs >> 6; uint64_t gbit = 1ull << (gs & 63u);
+                                    for (size_t bb = 0; bb < n_blocks; bb++)
+                                        if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit))
+                                            a64_bs_set(b_src, (uint32_t)bb);
+                                }
+                            }
+                            if (ds < 0) {
+                                memset(b_dst, 0, nb_w * sizeof(uint64_t));
+                                a64_bs_set(b_dst, def_blk[dvi]);
+                                uint32_t gd = glob_id[dvi];
+                                if (gd != UINT32_MAX) {
+                                    size_t gw = gd >> 6; uint64_t gbit = 1ull << (gd & 63u);
+                                    for (size_t bb = 0; bb < n_blocks; bb++)
+                                        if ((live_in[bb * bw_g + gw] & gbit) || (live_out[bb * bw_g + gw] & gbit))
+                                            a64_bs_set(b_dst, (uint32_t)bb);
+                                }
+                            }
+                            if (ss < 0 && ds < 0) {
+                                bool disj = true;
+                                for (size_t w = 0; w < nb_w; w++)
+                                    if (b_src[w] & b_dst[w]) { disj = false; break; }
+                                if (disj) {
+                                    int32_t sl = next_slot++;
+                                    coal_slot[svi] = sl;
+                                    coal_slot[dvi] = sl;
+                                    uint64_t *sb = slot_blks + (size_t)sl * nb_w;
+                                    for (size_t w = 0; w < nb_w; w++) sb[w] = b_src[w] | b_dst[w];
+                                }
+                            } else if (ss >= 0) {
+                                uint64_t *sb = slot_blks + (size_t)ss * nb_w;
+                                bool disj = true;
+                                for (size_t w = 0; w < nb_w; w++)
+                                    if (sb[w] & b_dst[w]) { disj = false; break; }
+                                if (disj) {
+                                    coal_slot[dvi] = ss;
+                                    for (size_t w = 0; w < nb_w; w++) sb[w] |= b_dst[w];
+                                }
+                            } else {
+                                uint64_t *sb = slot_blks + (size_t)ds * nb_w;
+                                bool disj = true;
+                                for (size_t w = 0; w < nb_w; w++)
+                                    if (sb[w] & b_src[w]) { disj = false; break; }
+                                if (disj) {
+                                    coal_slot[svi] = ds;
+                                    for (size_t w = 0; w < nb_w; w++) sb[w] |= b_src[w];
+                                }
+                            }
+                        }
+                    }
+                }
+                free(b_dst); free(b_src); free(slot_blks);
+            }
             uint32_t *sl_slot = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
             uint32_t *sl_end  = (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
             uint32_t *freelist= (uint32_t *)ra_bump(mbuf, &moff, nv_sz * sizeof(uint32_t));
             size_t n_sact = 0, n_free = 0;
-            int32_t *sm_d = sm->dense;
             for (uint32_t k = 0; k < nv; k++) {
                 uint32_t vi = order[k];
                 uint32_t fp = first_pos[vi];
@@ -1842,12 +2067,17 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     sl_heap_pop(sl_end, sl_slot, &n_sact);
                 }
                 if (home_pk[vi] >= 0) continue;           // register-homed: no slot
-                uint32_t slot = (!no_reuse && n_free > 0) ? freelist[--n_free]
-                                                          : (uint32_t)next_slot++;
-                if (last_use[vi] > fp) {
-                    sl_heap_push(sl_end, sl_slot, &n_sact, last_use[vi], slot);
-                } else if (!no_reuse) {
-                    freelist[n_free++] = slot;
+                uint32_t slot;
+                if (coal_slot && coal_slot[vi] >= 0) {
+                    slot = (uint32_t)coal_slot[vi];
+                } else {
+                    slot = (!no_reuse && n_free > 0) ? freelist[--n_free]
+                                                     : (uint32_t)next_slot++;
+                    if (last_use[vi] > fp) {
+                        sl_heap_push(sl_end, sl_slot, &n_sact, last_use[vi], slot);
+                    } else if (!no_reuse) {
+                        freelist[n_free++] = slot;
+                    }
                 }
                 if (sm_d) {
                     uintptr_t idx = (uintptr_t)handle[vi] - min_vh;
@@ -1856,8 +2086,10 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     sm_put(sm, handle[vi], (int32_t)slot);
                 }
             }
+            if (coal_slot) free(coal_slot);
         }
     }
+    #undef RA_VMAP_GET
     if (env->spill_stats) {
         for (uint32_t vi = 0; vi < nv; vi++) {
             if (home_pk[vi] >= 0) continue;
