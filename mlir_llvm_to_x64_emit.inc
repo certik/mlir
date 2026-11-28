@@ -631,12 +631,12 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
     return false;
 }
 
-// Compute the constant byte offset of a 1-operand `llvm.getelementptr` (all
-// constant indices). Returns true iff the offset is constant and fits in
+// Compute the constant byte offset of an `llvm.getelementptr` whose indices are
+// all compile-time constants (either in `rawConstantIndices` or constant SSA
+// operands like `ptr[2]`). Returns true iff the total offset fits in
 // [-1073741824, 1073741823] (safe for both [base+disp] and [rbp-(aoff-disp)]).
 static bool x64_gep_const_offset(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *out_off) {
     if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_GEP) return false;
-    if (MLIR_GetOpNumOperands(ctx, op) != 1) return false;
     MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
     MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
     if (!eta || !ria) return false;
@@ -644,14 +644,29 @@ static bool x64_gep_const_offset(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *o
     int32_t cidx[64];
     size_t n_idx = MLIR_GetAttributeDenseI32(ctx, ria, cidx, 64);
     if (n_idx == 0 || n_idx > 64) return false;
+    size_t nop = MLIR_GetOpNumOperands(ctx, op);
+    size_t op_idx = 1;
     int64_t total = 0;
     MLIR_TypeHandle cur_ty = elem_ty;
     for (size_t i = 0; i < n_idx; i++) {
         int32_t ci = cidx[i];
-        if (ci == (int32_t)0x80000000) return false;
+        int64_t idx_val = (int64_t)ci;
+        if (ci == (int32_t)0x80000000) {
+            if (op_idx >= nop) return false;
+            MLIR_ValueHandle iv = MLIR_GetOpOperand(ctx, op, op_idx++);
+            int64_t cv = 0;
+            if (!is_const(ctx, MLIR_GetValueDefiningOp(ctx, iv), &cv)) return false;
+            int ib = int_bits(ctx, iv);
+            if (ib > 0 && ib < 64) {
+                uint64_t m = 1ull << (ib - 1);
+                cv = (int64_t)(((uint64_t)cv & ((1ull << ib) - 1ull)) ^ m) - (int64_t)m;
+            }
+            idx_val = cv;
+        }
         if (i == 0) {
-            if (ci != 0) total += (int64_t)ci * (int64_t)x64_type_size(ctx, elem_ty);
+            if (idx_val != 0) total += idx_val * (int64_t)x64_type_size(ctx, elem_ty);
         } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
+            if (ci == (int32_t)0x80000000) return false;
             MLIR_TypeHandle next_ty = MLIR_INVALID_HANDLE;
             unsigned foff = x64_struct_field_info(ctx, cur_ty, (size_t)ci, &next_ty);
             cur_ty = next_ty;
@@ -659,7 +674,7 @@ static bool x64_gep_const_offset(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *o
         } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
             MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, cur_ty);
             cur_ty = et;
-            if (ci != 0) total += (int64_t)ci * (int64_t)x64_type_size(ctx, et);
+            if (idx_val != 0) total += idx_val * (int64_t)x64_type_size(ctx, et);
         } else {
             return false;
         }

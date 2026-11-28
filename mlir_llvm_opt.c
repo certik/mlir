@@ -631,6 +631,7 @@ typedef struct {
     size_t n_ops;
     size_t n_blocks;
     bool has_alloca;
+    bool only_devirt; // larger callee with indirect call: inline only if call passes addressof!
 } InlCand;
 
 static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *out) {
@@ -638,7 +639,7 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     if (MLIR_GetOpNumRegions(ctx, fn) == 0) return false;
     MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
-    if (nb == 0 || nb > 12) return false;
+    if (nb == 0 || nb > 28) return false;
     string name = opt_attr_str(ctx, fn, MLIR_KEY_SYM_NAME);
     if (name.size == 0) return false;
     if (name.size == 4 && memcmp(name.str, "main", 4) == 0) return false;
@@ -651,11 +652,12 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
     size_t total_ops = 0;
     bool has_alloca = false;
     bool has_call = false;
+    bool has_indirect_call = false;
     for (size_t b = 0; b < nb; b++) {
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         total_ops += no;
-        if (total_ops > 90) return false;
+        if (total_ops > 160) return false;
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return false;
@@ -668,19 +670,74 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
                 has_call = true;
                 string cn = opt_strip_at(opt_attr_str(ctx, op, MLIR_KEY_CALLEE));
                 if (!cn.size) cn = opt_strip_at(opt_attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
-                if (opt_str_eq(cn, name)) return false; // skip directly recursive callee
+                if (!cn.size) has_indirect_call = true;
+                else if (opt_str_eq(cn, name)) return false; // skip directly recursive callee
             }
         }
     }
-    // Non-leaf functions use the tighter budget (<= 8 blocks, <= 50 ops);
-    // leaf functions (like crcu8) get up to 12 blocks / 90 ops.
-    if (has_call && (nb > 8 || total_ops > 50)) return false;
+    bool only_devirt = false;
+    if (has_call) {
+        if (nb > 8 || total_ops > 50) {
+            if (has_indirect_call && nb <= 28 && total_ops <= 160) only_devirt = true;
+            else return false;
+        }
+    } else {
+        if (nb > 14 || total_ops > 100) return false;
+    }
     out->name = name;
     out->fn = fn;
     out->n_ops = total_ops;
     out->n_blocks = nb;
     out->has_alloca = has_alloca;
+    out->only_devirt = only_devirt;
     return true;
+}
+
+// Devirtualize indirect `llvm.call %fnptr(args...)` where `%fnptr` is
+// `llvm.mlir.addressof @foo` into direct `llvm.call @foo(args...)`.
+static void inl_devirt_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    if (MLIR_GetOpNumRegions(ctx, fn) == 0) return;
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_CALL) continue;
+            if (MLIR_GetOpAttr(ctx, op, MLIR_KEY_CALLEE) != MLIR_INVALID_HANDLE ||
+                MLIR_GetOpAttr(ctx, op, MLIR_KEY_CALLEE_NAME) != MLIR_INVALID_HANDLE)
+                continue;
+            if (MLIR_GetOpAttr(ctx, op, MLIR_KEY_VAR_CALLEE_TYPE) != MLIR_INVALID_HANDLE)
+                continue;
+            size_t nop = MLIR_GetOpNumOperands(ctx, op);
+            if (nop < 1 || nop > 16) continue;
+            MLIR_OpHandle def = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, 0));
+            if (def == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, def) != OP_TYPE_LLVM_MLIR_ADDRESSOF)
+                continue;
+            MLIR_AttributeHandle gname = MLIR_GetOpAttr(ctx, def, MLIR_KEY_GLOBAL_NAME);
+            if (gname == MLIR_INVALID_HANDLE) continue;
+            MLIR_ValueHandle args[16];
+            for (size_t k = 1; k < nop; k++) args[k - 1] = MLIR_GetOpOperand(ctx, op, k);
+            size_t nres = MLIR_GetOpNumResults(ctx, op);
+            MLIR_TypeHandle rty = nres ? MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0)) : MLIR_INVALID_HANDLE;
+            MLIR_NamedAttr attr = MLIR_Named(MLIR_KEY_CALLEE, gname);
+            MLIR_OpSpec sp;
+            memset(&sp, 0, sizeof(sp));
+            sp.type = OP_TYPE_LLVM_CALL;
+            sp.operands = (nop > 1) ? args : NULL;
+            sp.n_operands = nop - 1;
+            sp.result_types = nres ? &rty : NULL;
+            sp.n_results = nres;
+            sp.attrs = &attr;
+            sp.n_attrs = 1;
+            MLIR_OpHandle dcall = MLIR_CreateOpFromSpec(ctx, &sp);
+            MLIR_InsertBlockOpAtIndex(ctx, bk, dcall, i);
+            if (nres == 1)
+                MLIR_ReplaceAllUsesOfValue(ctx, MLIR_GetOpResult(ctx, op, 0), MLIR_GetOpResult(ctx, dcall, 0));
+            MLIR_EraseOp(ctx, op);
+        }
+    }
 }
 
 static bool inl_inline_call(MLIR_Context *ctx, MLIR_RegionHandle caller_reg,
@@ -894,7 +951,12 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module) {
     size_t n_fns = MLIR_GetBlockNumOps(ctx, mb);
     if (n_fns == 0) return;
 
-    for (int round = 0; round < 2; round++) {
+    for (int round = 0; round < 3; round++) {
+        // Devirtualize any indirect calls to known function addresses first.
+        for (size_t fi = 0; fi < n_fns; fi++) {
+            MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, fi);
+            if (MLIR_GetOpType(ctx, fn) == OP_TYPE_LLVM_FUNC) inl_devirt_func(ctx, fn);
+        }
         // Collect candidate callees into a hash table.
         InlCand *cands = (InlCand *)malloc(n_fns * sizeof(InlCand));
         size_t nc = 0;
@@ -926,12 +988,12 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module) {
             size_t caller_ops = 0;
             for (size_t b = 0; b < cnb; b++)
                 caller_ops += MLIR_GetBlockNumOps(ctx, MLIR_GetRegionBlock(ctx, creg, b));
-            if (caller_ops > 1500) continue;
+            if (caller_ops > 2000) continue;
 
             int n_inlined = 0;
-            for (size_t b = 0; b < MLIR_GetRegionNumBlocks(ctx, creg) && caller_ops <= 1500 && n_inlined < 16; b++) {
+            for (size_t b = 0; b < MLIR_GetRegionNumBlocks(ctx, creg) && caller_ops <= 2000 && n_inlined < 20; b++) {
                 MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, creg, b);
-                for (size_t i = 0; i < MLIR_GetBlockNumOps(ctx, bk) && caller_ops <= 1500 && n_inlined < 16; i++) {
+                for (size_t i = 0; i < MLIR_GetBlockNumOps(ctx, bk) && caller_ops <= 2000 && n_inlined < 20; i++) {
                     MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
                     MLIR_OpType ot = MLIR_GetOpType(ctx, op);
                     if (ot != OP_TYPE_LLVM_CALL && ot != OP_TYPE_FUNC_CALL) continue;
@@ -948,6 +1010,17 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module) {
                         j = (j + 1) & hmask;
                     }
                     if (!found) continue;
+                    if (found->only_devirt) {
+                        bool passes_fnptr = false;
+                        size_t cnop = MLIR_GetOpNumOperands(ctx, op);
+                        for (size_t k = 0; k < cnop; k++) {
+                            MLIR_OpHandle ad = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, op, k));
+                            if (ad != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, ad) == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
+                                passes_fnptr = true; break;
+                            }
+                        }
+                        if (!passes_fnptr) continue;
+                    }
                     if (inl_inline_call(ctx, creg, bk, i, op, found->fn)) {
                         caller_ops += found->n_ops;
                         n_inlined++;
