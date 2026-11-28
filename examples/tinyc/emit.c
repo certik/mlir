@@ -222,6 +222,7 @@ typedef struct {
     bool             need_syscall6_stub;   // emit @__tinyc_syscall6 extern decl
     bool             need_setjmp_stub;     // emit @__tinyc_setjmp extern decl
     bool             need_longjmp_stub;    // emit @__tinyc_longjmp extern decl
+    uint16_t         cur_file_id;    // 1-based index into program->source_files
     int              cur_line;       // last AST node line entered; used by
                                      // EMIT_ERR for diagnostic line numbers.
     int              err_count;      // count of EMIT_ERR diagnostics
@@ -280,16 +281,31 @@ static int fact_get(E *e, MLIR_ValueHandle v) {
 // pre-pass loops.
 #define EMIT_ERR(e, msg, ...) \
     do { \
-        println(str_lit("tinyc emit error at line {}: " msg), \
-                (int64_t)((e)->cur_line), ##__VA_ARGS__); \
+        if ((e)->cur_file_id > 0 && (e)->program && \
+            (e)->cur_file_id <= (e)->program->n_source_files) { \
+            println(str_lit("tinyc emit error at {}:{}: " msg), \
+                    (e)->program->source_files[(e)->cur_file_id - 1], \
+                    (int64_t)((e)->cur_line), ##__VA_ARGS__); \
+        } else { \
+            println(str_lit("tinyc emit error at line {}: " msg), \
+                    (int64_t)((e)->cur_line), ##__VA_ARGS__); \
+        } \
         (e)->err_count++; \
     } while (0)
 
 // An emit-time warning. Like preprocess.c's diagnostics it goes to stderr,
 // since stdout can carry the --emit output.
 static void emit_warn(E *e, string msg) {
-    string text = format(e->arena, str_lit("tinyc emit warning at line {}: {}\n"),
-                         (int64_t)e->cur_line, msg);
+    string text;
+    if (e->cur_file_id > 0 && e->program &&
+        e->cur_file_id <= e->program->n_source_files) {
+        text = format(e->arena, str_lit("tinyc emit warning at {}:{}: {}\n"),
+                      e->program->source_files[e->cur_file_id - 1],
+                      (int64_t)e->cur_line, msg);
+    } else {
+        text = format(e->arena, str_lit("tinyc emit warning at line {}: {}\n"),
+                      (int64_t)e->cur_line, msg);
+    }
     ciovec_t iov;
     iov.buf = text.str;
     iov.buf_len = text.size;
@@ -1827,6 +1843,7 @@ static void sctx_push(E *e, SCtx *c, int32_t v) {
 
 static SCtx walk_struct_lhs(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
+    e->cur_file_id = ex->file_id;
     SCtx r = {0};
     r.dyn_index = MLIR_INVALID_HANDLE;
     if (ex->kind == EX_VAR) {
@@ -2056,6 +2073,7 @@ static LVal emit_lvalue(E *e, Scope *sc, Expr *ex) {
     }
     if (ex == e->compound_lv_expr) return *e->compound_lv;
     e->cur_line = ex->line;
+    e->cur_file_id = ex->file_id;
     LVal r = {0};
     r.source_elem = MLIR_INVALID_HANDLE;
     r.dyn_index = MLIR_INVALID_HANDLE;
@@ -3468,8 +3486,72 @@ static Expr *generic_select(E *e, Scope *sc, Expr *ex) {
     return ex->extra->args.data[chosen];
 }
 
+static EVal emit_expr(E *e, Scope *sc, Expr *ex);
+
+static void emit_array_field_init(E *e, Scope *sc, MLIR_ValueHandle dst_ptr,
+                                  Type ft, Expr *ae) {
+    MLIR_TypeHandle arr_ty = array_mlir_type(e, &ft);
+    MLIR_TypeHandle elem_ty = array_elem_type(e, &ft);
+    if (ae->kind == EX_STR && ft.kind == TY_ARRAY_I32 &&
+        elem_ty == e->i8 && ft.array_len2 == 0) {
+        string lit = ae->name;
+        int64_t alen = ft.array_len;
+        if ((int64_t)lit.size > alen) {
+            EMIT_ERR(e, "string initializer ({} bytes) too long for char[{}]",
+                     (int64_t)lit.size, alen);
+        }
+        int64_t lim = (int64_t)lit.size < alen ? (int64_t)lit.size : alen;
+        for (int64_t k = 0; k < lim; k++) {
+            MLIR_ValueHandle bv = emit_const_narrow(e, (int64_t)(uint8_t)lit.str[k], e->i8);
+            int32_t path[2] = {0, (int32_t)k};
+            MLIR_ValueHandle ep = emit_gep(e, dst_ptr, arr_ty, path, 2, NULL, 0);
+            emit_store_v(e, bv, ep);
+        }
+        return;
+    }
+    if (ae->kind == EX_INT && ae->val.int_value == 0) {
+        return; // already zero-initialized
+    }
+    if (ae->kind != EX_COMPOUND) {
+        EMIT_ERR(e, "array field initializer must be a brace list or string literal");
+        return;
+    }
+    size_t n = ae->extra->args.size;
+    if (ft.array_len2 != 0) {
+        int64_t lim1 = (int64_t)n < ft.array_len ? (int64_t)n : ft.array_len;
+        for (int64_t a = 0; a < lim1; a++) {
+            Expr *row = ae->extra->args.data[a];
+            if (row->kind != EX_COMPOUND) continue;
+            size_t rn = row->extra->args.size;
+            int64_t lim2 = (int64_t)rn < ft.array_len2 ? (int64_t)rn : ft.array_len2;
+            for (int64_t b = 0; b < lim2; b++) {
+                EVal ev = emit_expr(e, sc, row->extra->args.data[b]);
+                MLIR_ValueHandle sv = (ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT)
+                    ? int_to_ptr(e, ev) : coerce_eval_to(e, ev, elem_ty, ft);
+                int32_t path[3] = {0, (int32_t)a, (int32_t)b};
+                MLIR_ValueHandle ep = emit_gep(e, dst_ptr, arr_ty, path, 3, NULL, 0);
+                emit_store_v(e, sv, ep);
+            }
+        }
+        return;
+    }
+    if ((int64_t)n > ft.array_len) {
+        EMIT_ERR(e, "too many initializers for array field");
+        n = (size_t)ft.array_len;
+    }
+    for (size_t k = 0; k < n; k++) {
+        EVal ev = emit_expr(e, sc, ae->extra->args.data[k]);
+        MLIR_ValueHandle sv = (ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT)
+            ? int_to_ptr(e, ev) : coerce_eval_to(e, ev, elem_ty, ft);
+        int32_t path[2] = {0, (int32_t)k};
+        MLIR_ValueHandle ep = emit_gep(e, dst_ptr, arr_ty, path, 2, NULL, 0);
+        emit_store_v(e, sv, ep);
+    }
+}
+
 static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
     e->cur_line = ex->line;
+    e->cur_file_id = ex->file_id;
     EVal r = {0};
     if (e->err_count > 0) return r;
     if (ex->kind == EX_GENERIC) {
@@ -5477,6 +5559,11 @@ static EVal emit_expr(E *e, Scope *sc, Expr *ex) {
                         }
                         continue;
                     }
+                    if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                        ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT) {
+                        emit_array_field_init(e, sc, p, ft, ex->extra->args.data[i]);
+                        continue;
+                    }
                     EVal v = emit_expr(e, sc, ex->extra->args.data[i]);
                     MLIR_TypeHandle want = scalar_mem_type(e, &ft);
                     MLIR_ValueHandle sv;
@@ -5776,6 +5863,7 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
     if (e->err_count > 0) return;
     if (e->terminated && st->kind != ST_LABEL) return;
     e->cur_line = st->line;
+    e->cur_file_id = st->file_id;
     switch (st->kind) {
         case ST_EXPR: {
             emit_expr_for_side_effect(e, sc, st->expr);
@@ -5794,6 +5882,10 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
             if (st->extra && st->extra->decl_static_global_sym.size > 0) {
                 sy->is_global = true;
                 sy->global_sym = st->extra->decl_static_global_sym;
+                if (sy->type.kind == TY_STRUCT || sy->type.kind == TY_PTR_STRUCT ||
+                    sy->type.kind == TY_ARRAY_STRUCT) {
+                    sy->sdef = find_struct(e, sy->type.struct_name);
+                }
                 scope_add(e, sc, sy);
                 return;
             }
@@ -6162,6 +6254,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                         }
                                         continue;
                                     }
+                                    if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                                        ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT) {
+                                        emit_array_field_init(e, sc, pf, ft, fe);
+                                        continue;
+                                    }
                                     EVal v = emit_expr(e, sc, fe);
                                     MLIR_ValueHandle sv;
                                     if (ft.kind == TY_PTR_I32 ||
@@ -6197,6 +6294,15 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                                 "or struct value");
                                 }
                             }
+                        }
+                        // Zero-initialize any remaining unspecified elements (#306).
+                        for (int64_t k = (int64_t)n; k < alen; k++) {
+                            int32_t epath[2] = {0, (int32_t)k};
+                            MLIR_ValueHandle pelem = emit_gep(
+                                e, sy->addr, arr_ty, epath, 2, NULL, 0);
+                            int32_t *zprefix = arena_new_array(e->arena, int32_t, 1);
+                            zprefix[0] = 0;
+                            emit_struct_zero(e, pelem, st_ty, sd, zprefix, 1);
                         }
                     }
                 }
@@ -6306,6 +6412,11 @@ static void emit_stmt(E *e, Scope *sc, Stmt *st) {
                                                     "struct value");
                                     }
                                 }
+                                continue;
+                            }
+                            if (ft.kind == TY_ARRAY_I32 || ft.kind == TY_ARRAY_F32 ||
+                                ft.kind == TY_ARRAY_PTR_CHAR || ft.kind == TY_ARRAY_PTR_STRUCT) {
+                                emit_array_field_init(e, sc, p, ft, st->expr->extra->args.data[i]);
                                 continue;
                             }
                             EVal v = emit_expr(
@@ -6959,6 +7070,7 @@ static MLIR_TypeHandle local_slot_type(E *e, string name, const Type *t, bool *w
 
 static MLIR_OpHandle emit_func(E *e, Func *f) {
     e->cur_line = f->line;
+    e->cur_file_id = f->file_id;
     FuncSig *sig = find_sig(e, f->name);
 
     MLIR_RegionHandle body_r = MLIR_CreateRegion(e->ctx);
@@ -7567,6 +7679,7 @@ static void union_blob_layout(E *e, StructDef *sd, MLIR_TypeHandle *elem,
 // only; pointer fields don't count). Standard 3-color DFS.
 static bool struct_cycle_dfs(E *e, StructDef *sd, int *color, StructDef **stack, int depth) {
     e->cur_line = sd->line;
+    e->cur_file_id = sd->file_id;
     size_t idx = 0;
     for (; idx < e->n_struct_types && e->struct_types[idx].sd != sd; idx++) {}
     if (idx >= e->n_struct_types) return false;
@@ -7596,6 +7709,7 @@ static void check_struct_cycles(E *e) {
     for (size_t i = 0; i < e->n_struct_types; i++) {
         if (color[i] == 0) {
             e->cur_line = e->struct_types[i].sd->line;
+            e->cur_file_id = e->struct_types[i].sd->file_id;
             if (struct_cycle_dfs(e, e->struct_types[i].sd, color, stack, 0)) {
                 EMIT_ERR(e, "aborting due to cyclic struct definition");
                 exit(1);
@@ -7613,7 +7727,9 @@ static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx) {
     MLIR_TypeHandle ty = MLIR_CreateTypeLLVMStructIdentified(e->ctx, sd->name);
     e->struct_types[idx].ty = ty;
     int saved_line = e->cur_line;
+    uint16_t saved_file = e->cur_file_id;
     e->cur_line = sd->line;
+    e->cur_file_id = sd->file_id;
     if (sd->is_union) {
         MLIR_TypeHandle uelem; int64_t ues, uc;
         union_blob_layout(e, sd, &uelem, &ues, &uc);
@@ -7621,6 +7737,7 @@ static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx) {
         ubody[0] = MLIR_CreateTypeLLVMArray(e->ctx, uelem, (uint64_t)uc);
         MLIR_SetTypeLLVMStructBody(e->ctx, ty, ubody, 1);
         e->cur_line = saved_line;
+        e->cur_file_id = saved_file;
         return ty;
     }
     struct_compute_layout(sd);
@@ -7651,6 +7768,7 @@ static MLIR_TypeHandle resolve_struct_type(E *e, size_t idx) {
     }
     MLIR_SetTypeLLVMStructBody(e->ctx, ty, body, nb);
     e->cur_line = saved_line;
+    e->cur_file_id = saved_file;
     return ty;
 }
 
@@ -8280,6 +8398,7 @@ MLIR_OpHandle tinyc_emit_module(MLIR_Context *ctx, Program *program) {
     for (size_t i = 0; i < program->globals.size; i++) {
         Global *g = &program->globals.data[i];
         e.cur_line = g->line;
+        e.cur_file_id = g->file_id;
         // Resolve a deferred array length (e.g. `[20 + 1]` or `[N]` with an
         // enumerator N) with no scope (file-scope constant expressions
         // only) before the symbol copies the type, so `sizeof` sees it.

@@ -134,6 +134,7 @@ COREC_BASE_SOURCES = [
     "base/string.c",
     "base/numconv.c",
     "base/format.c",
+    "base/math.c",
     "base/strbuf.c",
     "base/io.c",
     "base/buddy.c",
@@ -146,6 +147,7 @@ STDLIB_SOURCES = [
     "stdlib/stdlib.c",
     "stdlib/stdio.c",
     "stdlib/printf.c",
+    "stdlib/math_impl.c",
 ]
 
 

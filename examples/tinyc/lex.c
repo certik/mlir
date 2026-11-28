@@ -201,9 +201,45 @@ static void int_lit_type(TcTok *t, int n_l, bool has_u, bool decimal) {
                          (is_u   ? TC_TOK_F_UNSIGNED : 0u));
 }
 
+static string *g_last_lex_files = NULL;
+static size_t  g_last_lex_nfiles = 0;
+
+void tinyc_set_last_lex_files(string *files, size_t n) {
+    g_last_lex_files = files;
+    g_last_lex_nfiles = n;
+}
+
+string *tinyc_last_lex_files(size_t *out_n) {
+    if (out_n) *out_n = g_last_lex_nfiles;
+    return g_last_lex_files;
+}
+
+static uint16_t lex_intern_file(Arena *arena, string **files, size_t *n, size_t *cap, string f) {
+    for (size_t i = 0; i < *n; i++) {
+        if ((*files)[i].size == f.size &&
+            ((*files)[i].str == f.str || memcmp((*files)[i].str, f.str, f.size) == 0))
+            return (uint16_t)(i + 1);
+    }
+    if (*n == *cap) {
+        size_t ncap = *cap ? *cap * 2 : 16;
+        string *nf = arena_new_array(arena, string, ncap);
+        if (*n) memcpy(nf, *files, *n * sizeof(string));
+        *files = nf;
+        *cap = ncap;
+    }
+    (*files)[*n] = f;
+    *n = *n + 1;
+    return (uint16_t)(*n);
+}
+
 VecTcTok tinyc_lex(Arena *arena, string src) {
     lex_init_ctype();
     VecTcTok toks; VecTcTok_reserve(arena, &toks, src.size / 4 + 256);
+    string *lex_files = NULL;
+    size_t  n_lex_files = 0;
+    size_t  lex_files_cap = 0;
+    uint16_t cur_file_id = 0;
+    size_t  file_stamp_pos = 0;
     const char *s = src.str;
     size_t sz = src.size;
     size_t i = 0;
@@ -262,10 +298,36 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
                     new_line = new_line * 10 + (src.str[j] - '0');
                     j++;
                 }
-                // Skip rest of line (optional "file" string and any
-                // trailing junk).
+                while (j < src.size && (src.str[j] == ' ' || src.str[j] == '\t')) j++;
+                uint16_t new_fid = cur_file_id;
+                if (j < src.size && src.str[j] == '"') {
+                    j++;
+                    size_t fstart = j;
+                    while (j < src.size && src.str[j] != '"' && src.str[j] != '\n') {
+                        if (src.str[j] == '\\' && j + 1 < src.size) j += 2;
+                        else j++;
+                    }
+                    size_t raw_len = j - fstart;
+                    char *fbuf = arena_new_array(arena, char, raw_len + 1);
+                    size_t flen = 0;
+                    for (size_t fk = fstart; fk < fstart + raw_len; fk++) {
+                        if (src.str[fk] == '\\' && fk + 1 < fstart + raw_len) fk++;
+                        fbuf[flen++] = src.str[fk];
+                    }
+                    fbuf[flen] = '\0';
+                    new_fid = lex_intern_file(arena, &lex_files, &n_lex_files, &lex_files_cap,
+                                              (string){.str = fbuf, .size = flen});
+                }
                 while (j < src.size && src.str[j] != '\n') j++;
                 if (j < src.size) j++; // consume newline
+                if (new_fid != cur_file_id) {
+                    if (cur_file_id != 0) {
+                        for (size_t k = file_stamp_pos; k < toks.size; k++)
+                            toks.data[k].file_id = cur_file_id;
+                    }
+                    file_stamp_pos = toks.size;
+                    cur_file_id = new_fid;
+                }
                 line = new_line;
                 i = j;
                 continue;
@@ -657,6 +719,11 @@ VecTcTok tinyc_lex(Arena *arena, string src) {
     }
     TcTok eof = (TcTok){.kind = TC_TK_EOF, .line = line};
     VecTcTok_push_back(arena, &toks, eof);
+    if (cur_file_id != 0) {
+        for (size_t k = file_stamp_pos; k < toks.size; k++)
+            toks.data[k].file_id = cur_file_id;
+    }
+    tinyc_set_last_lex_files(lex_files, n_lex_files);
     return toks;
 }
 

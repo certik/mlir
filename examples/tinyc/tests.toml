@@ -1849,3 +1849,41 @@ name = "struct_array_of_struct_field"
 targets = ["native", "wasm", "macho", "elf"]
 # Arrays of structs as struct fields (#340).
 expected_stdout = "44 1071 1168 400\n"
+
+[[test]]
+name = "struct_init_and_fields"
+targets = ["native", "wasm", "macho", "elf"]
+# Fnptr+plain multi-decl field (#382), typedef'd struct-ptr & / ** (#366),
+# static local struct persistence (#313), partial array-of-structs zero-init
+# (#306), and nested brace array-field initializer (#307).
+expected_stdout = "1 41 42\n1 99\n93\n77\n1 4 0 0\n1 abc 10 30\n2 xy 6 0 0\n"
+
+[[test]]
+name = "pp_mutual_recursion"
+targets = ["native", "wasm", "macho", "elf"]
+# Mutually recursive object-like and function-like macros terminate (#380).
+expected_stdout = "41 42 100\n"
+
+[[test]]
+name = "pp_predefined_macros"
+targets = ["native", "wasm", "macho", "elf"]
+# Target-appropriate predefined macros and LP64/wasm32 LONG_MAX (#338).
+expected_stdout = "1 1 1 1\n"
+
+[[test]]
+name = "diag_filename_parse"
+targets = ["native", "wasm", "macho", "elf"]
+# Parse diagnostics include the source filename (#338).
+expected_compile_error = "diag_filename_parse.tc:2:"
+
+[[test]]
+name = "diag_filename_emit"
+targets = ["native", "wasm", "macho", "elf"]
+# Emit diagnostics include the source filename (#338).
+expected_compile_error = "diag_filename_emit.tc:2:"
+
+[[test]]
+name = "stdlib_math"
+source = "tests/stdlib_math.tc"
+targets = ["native", "wasm", "elf", "macho"]
+expected_stdout = "0 1 1 0 1024 4 2 3\n0 1 256\n"
