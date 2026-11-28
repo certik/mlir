@@ -871,6 +871,12 @@ static void load_val_w(FnCtx *F, MLIR_ValueHandle v, uint8_t reg, int w) {
                    dt == OP_TYPE_LLVM_MLIR_UNDEF) {
             mov_ri(F, reg, 0, w);
             return;
+        } else if (dt == OP_TYPE_LLVM_SEXT || dt == OP_TYPE_LLVM_ZEXT || dt == OP_TYPE_LLVM_TRUNC) {
+            int64_t cv = 0;
+            if (is_const(ctx, def, &cv)) {
+                mov_ri(F, reg, cv, w);
+                return;
+            }
         } else if (dt == OP_TYPE_LLVM_MLIR_ADDRESSOF) {
             MLIR_AttributeHandle a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_GLOBAL_NAME);
             if (a == MLIR_INVALID_HANDLE) a = MLIR_GetOpAttr(ctx, def, MLIR_KEY_VALUE);
@@ -928,7 +934,9 @@ static inline uint8_t val_reg_or_load(FnCtx *F, MLIR_ValueHandle v, uint8_t scra
         if (val_in_reg(F, v, &rH)) return rH;
     } else {
         MLIR_OpHandle def = MLIR_GetValueDefiningOp(F->ctx, v);
-        if ((def == MLIR_INVALID_HANDLE || !x64_is_remat_type(MLIR_GetOpType(F->ctx, def))) &&
+        int64_t dummy;
+        if ((def == MLIR_INVALID_HANDLE ||
+             (!x64_is_remat_type(MLIR_GetOpType(F->ctx, def)) && !is_const(F->ctx, def, &dummy))) &&
             val_in_reg(F, v, &rH))
             return rH;
     }
