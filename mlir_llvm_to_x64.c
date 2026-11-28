@@ -727,6 +727,13 @@ static void store_mem_sib(FnCtx *F, uint8_t base, uint8_t idx, uint8_t src, int 
     else if (bytes == 4) { rex(F,0,src,idx,base); eb(F,0x89); modrm_mem_sib(F,src,base,idx,scale); }
     else                 { rex(F,1,src,idx,base); eb(F,0x89); modrm_mem_sib(F,src,base,idx,scale); }
 }
+// mov BYTE PTR [base + idx*(1<<scale)], imm8   ([REX] C6 /0 SIB ib)
+static void store_mem_sib_imm8(FnCtx *F, uint8_t base, uint8_t idx, int scale, uint8_t imm8) {
+    rex(F, 0, 0, idx, base);
+    eb(F, 0xC6);
+    modrm_mem_sib(F, 0, base, idx, scale);
+    eb(F, imm8);
+}
 static void lea_mem_disp(FnCtx *F, uint8_t dst, uint8_t base, int32_t disp) {
     rex(F, 1, dst, 0, base);
     eb(F, 0x8D);

@@ -22,6 +22,7 @@
 #include "mlir_llvm_load_cse.h"
 #include "mlir_llvm_arith_gvn.h"
 #include "mlir_llvm_dce.h"
+#include "mlir_llvm_opt.h"
 #include "mlir_llvm_to_wasmssa.h"
 #include "mlir_wasmssa_to_wasmstack.h"
 #include "mlir_wasm_to_wat.h"
@@ -1878,6 +1879,7 @@ static int tinyc_main(void) {
             ts_add(TS_ARITH_GVN, t_gvn);
             uint64_t t_dce = ts_now();
             mlir_llvm_dce(ctx, module);
+            mlir_llvm_licm(ctx, module);
             ts_add(TS_DCE, t_dce);
         }
 #ifdef TINYC_HAS_ELF
