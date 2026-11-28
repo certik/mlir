@@ -761,8 +761,15 @@ static void emit_edge(FnCtx *F, MLIR_OpHandle term, size_t si, MLIR_BlockHandle 
     }
 }
 
-// Restore callee-saved registers, then `leave ; ret`.
+// Restore callee-saved registers, then `leave ; ret` (or `pop ; ret` when omit_fp).
 static void emit_epilogue(FnCtx *F) {
+    if (F->omit_fp) {
+        if (F->fp_pad) x64_emit1(F, OP_TYPE_X64_ADD_RSP, 8);
+        for (int j = F->n_cs - 1; j >= 0; j--)
+            x64_emit1(F, OP_TYPE_X64_POP_R, F->cs_reg[j]);
+        x64_emit0(F, OP_TYPE_X64_RET);
+        return;
+    }
     for (int j = F->n_cs - 1; j >= 0; j--)
         load_rbp(F, F->cs_reg[j], F->cs_base + 8 * (j + 1), 1);
     x64_emit0(F, OP_TYPE_X64_LEAVE);
@@ -2528,6 +2535,16 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
             eb(F, (uint8_t)(0x50 + (r & 7)));
             break;
         }
+        case OP_TYPE_X64_POP_R: {
+            uint8_t r = (uint8_t)MLIR_GetOpInlineI64(ctx, op);
+            if (r >= 8) eb(F, 0x41);
+            eb(F, (uint8_t)(0x58 + (r & 7)));
+            break;
+        }
+        case OP_TYPE_X64_REP_STOSB: {
+            eb(F, 0xF3); eb(F, 0xAA);
+            break;
+        }
         case OP_TYPE_X64_SUB_RSP: {
             uint32_t imm = (uint32_t)MLIR_GetOpInlineI64(ctx, op);
             if (imm <= 127) { eb(F, 0x48); eb(F, 0x83); modrm(F, 3, 5, RSP); eb(F, (uint8_t)imm); }
@@ -3385,20 +3402,49 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             }
         }
     }
-    cur += (int32_t)(max_edge * 8);
-    F.edge_tmp = (uint32_t)cur;          // temps occupy [rbp-cur .. ]
-    F.cs_base = cur;                     // callee-saved spill area follows
-    cur += (int32_t)(F.n_cs * 8);
-    F.frame = (uint32_t)((cur + 15) & ~15);
+    if (max_edge > 64) {
+        cur += (int32_t)(max_edge * 8);
+        F.edge_tmp = (uint32_t)cur;          // temps occupy [rbp-cur .. ]
+    }
 
-    // --- prologue: push rbp ; mov rbp,rsp ; sub rsp, frame ---
-    x64_emit1(&F, OP_TYPE_X64_PUSH_R, RBP);
-    mov_rr(&F, RBP, RSP, 1);
-    if (F.frame) x64_emit1(&F, OP_TYPE_X64_SUB_RSP, (int64_t)F.frame);
+    // Check if we can omit the frame pointer (rbp): requires 0 local stack slots,
+    // <= 6 entry args (no [rbp+16] stack params), and no llvm.intr.vastart.
+    bool can_omit_fp = (g_x64_opt_level >= 1 && cur == 0);
+    bool fn_has_call = false;
+    if (can_omit_fp) {
+        if (nb > 0 && MLIR_GetBlockNumArgs(ctx, MLIR_GetRegionBlock(ctx, reg, 0)) > 6)
+            can_omit_fp = false;
+        for (size_t b = 0; b < nb && can_omit_fp; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            for (size_t i = 0; i < no; i++) {
+                MLIR_OpType ot = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, bk, i));
+                if (ot == OP_TYPE_LLVM_INTR_VASTART) { can_omit_fp = false; break; }
+                if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL) fn_has_call = true;
+            }
+        }
+    }
+    if (can_omit_fp) {
+        F.omit_fp = true;
+        F.fp_pad = fn_has_call && ((F.n_cs & 1) == 0);
+        F.frame = 0;
+        for (int j = 0; j < F.n_cs; j++)
+            x64_emit1(&F, OP_TYPE_X64_PUSH_R, F.cs_reg[j]);
+        if (F.fp_pad) x64_emit1(&F, OP_TYPE_X64_SUB_RSP, 8);
+    } else {
+        F.cs_base = cur;                     // callee-saved spill area follows
+        cur += (int32_t)(F.n_cs * 8);
+        F.frame = (uint32_t)((cur + 15) & ~15);
 
-    // save the callee-saved registers the allocator used
-    for (int j = 0; j < F.n_cs; j++)
-        store_rbp(&F, F.cs_base + 8 * (j + 1), F.cs_reg[j], 1);
+        // --- prologue: push rbp ; mov rbp,rsp ; sub rsp, frame ---
+        x64_emit1(&F, OP_TYPE_X64_PUSH_R, RBP);
+        mov_rr(&F, RBP, RSP, 1);
+        if (F.frame) x64_emit1(&F, OP_TYPE_X64_SUB_RSP, (int64_t)F.frame);
+
+        // save the callee-saved registers the allocator used
+        for (int j = 0; j < F.n_cs; j++)
+            store_rbp(&F, F.cs_base + 8 * (j + 1), F.cs_reg[j], 1);
+    }
 
     // --- entry params: incoming arg regs -> entry block-arg homes (reg/slot).
     //     Uses parallel-move resolution (R11 cycle-break temp) because RDI/RSI/
@@ -3464,7 +3510,7 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
     uintptr_t *jbh_k = NULL;
     int32_t   *jbh_v = NULL;
     size_t jbh_mask = 0;
-    if (g_x64_opt_level >= 1 && !F.fast_ra && nb >= 7) {
+    if (g_x64_opt_level >= 1 && !F.fast_ra && nb >= 3) {
         size_t jbh_cap = 16;
         while (jbh_cap < nb * 2) jbh_cap *= 2;
         jbh_k = (uintptr_t *)calloc(jbh_cap, sizeof(uintptr_t));
@@ -3640,6 +3686,168 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
         if (no > 0 && F.ok) {
             MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
             bool emitted_jtab = false;
+            // Byte-fill loop idiom (`rep stosb`):
+            //   ^H(%iv): cond = icmp slt/sle(%iv, %lim) ; cond_br(cond) [^body, ^exit]
+            //   ^body:   p = gep(%base, %iv) [elem_sz==1] ; store i8 const, p ; [br ^latch]
+            //   ^latch:  %iv1 = add(%iv, 1) ; br(%iv1) [^H]
+            bool header_pure_remat = true;
+            for (size_t hi = 0; hi < emit_end; hi++) {
+                if (!x64_op_rematerialized(ctx, MLIR_GetBlockOp(ctx, bk, hi))) { header_pure_remat = false; break; }
+            }
+            if (jbh_k && g_x64_opt_level >= 2 && header_pure_remat &&
+                fused_icmp != MLIR_INVALID_HANDLE && !fused_invert &&
+                MLIR_GetBlockNumArgs(ctx, bk) == 1 &&
+                MLIR_GetOpType(ctx, term) == OP_TYPE_LLVM_COND_BR &&
+                MLIR_GetOpNumSuccessorOperands(ctx, term, 0) == 0 &&
+                MLIR_GetOpNumSuccessorOperands(ctx, term, 1) == 0) {
+                MLIR_AttributeHandle pa0 = MLIR_GetOpAttr(ctx, fused_icmp, MLIR_KEY_PREDICATE);
+                int64_t pred0 = pa0 ? MLIR_GetAttributeInteger(ctx, pa0) : -1;
+                MLIR_ValueHandle iv = MLIR_GetBlockArg(ctx, bk, 0);
+                int iv_ib = int_bits(ctx, iv);
+                if ((pred0 == 2 || pred0 == 3) && (iv_ib == 32 || iv_ib == 64) &&
+                    MLIR_GetOpOperand(ctx, fused_icmp, 0) == iv) {
+                    MLIR_ValueHandle limit = MLIR_GetOpOperand(ctx, fused_icmp, 1);
+                    int body_bi = -1, exit_bi = -1;
+                    uintptr_t tk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, 0);
+                    size_t s = (tk * 1099511628211ull) & jbh_mask;
+                    while (jbh_k[s]) { if (jbh_k[s] == tk) { body_bi = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
+                    uintptr_t fk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, 1);
+                    s = (fk * 1099511628211ull) & jbh_mask;
+                    while (jbh_k[s]) { if (jbh_k[s] == fk) { exit_bi = jbh_v[s]; break; } s = (s + 1) & jbh_mask; }
+                    if (body_bi > (int)b && exit_bi >= 0 && pred_cnt[body_bi] == 1 && !skip_blk[body_bi]) {
+                        MLIR_BlockHandle bbk = MLIR_GetRegionBlock(ctx, reg, (size_t)body_bi);
+                        size_t bno = MLIR_GetBlockNumOps(ctx, bbk);
+                        if (MLIR_GetBlockNumArgs(ctx, bbk) == 0 && bno >= 3) {
+                            MLIR_OpHandle bterm = MLIR_GetBlockOp(ctx, bbk, bno - 1);
+                            int latch_bi = -1;
+                            MLIR_BlockHandle lbk = MLIR_INVALID_HANDLE;
+                            MLIR_OpHandle lterm = bterm;
+                            if (MLIR_GetOpType(ctx, bterm) == OP_TYPE_LLVM_BR) {
+                                MLIR_BlockHandle bsucc = MLIR_GetOpSuccessor(ctx, bterm, 0);
+                                if (bsucc != bk && MLIR_GetOpNumSuccessorOperands(ctx, bterm, 0) == 0) {
+                                    uintptr_t lk = (uintptr_t)bsucc;
+                                    size_t ls = (lk * 1099511628211ull) & jbh_mask;
+                                    while (jbh_k[ls]) { if (jbh_k[ls] == lk) { latch_bi = jbh_v[ls]; break; } ls = (ls + 1) & jbh_mask; }
+                                    if (latch_bi > (int)b && latch_bi != body_bi && pred_cnt[latch_bi] == 1 && !skip_blk[latch_bi]) {
+                                        lbk = bsucc;
+                                        size_t lno = MLIR_GetBlockNumOps(ctx, lbk);
+                                        if (MLIR_GetBlockNumArgs(ctx, lbk) == 0 && lno >= 2)
+                                            lterm = MLIR_GetBlockOp(ctx, lbk, lno - 1);
+                                        else
+                                            lbk = MLIR_INVALID_HANDLE;
+                                    }
+                                }
+                                if (MLIR_GetOpType(ctx, lterm) == OP_TYPE_LLVM_BR &&
+                                    MLIR_GetOpSuccessor(ctx, lterm, 0) == bk &&
+                                    MLIR_GetOpNumSuccessorOperands(ctx, lterm, 0) == 1) {
+                                    MLIR_ValueHandle iv_next = MLIR_GetOpSuccessorOperand(ctx, lterm, 0, 0);
+                                    MLIR_OpHandle gep_op = MLIR_INVALID_HANDLE;
+                                    MLIR_OpHandle st_op  = MLIR_INVALID_HANDLE;
+                                    MLIR_OpHandle add_op = MLIR_INVALID_HANDLE;
+                                    bool ok_fill = true;
+                                    MLIR_BlockHandle scan_blks[2] = { bbk, lbk };
+                                    for (int bi = 0; bi < 2 && ok_fill; bi++) {
+                                        if (scan_blks[bi] == MLIR_INVALID_HANDLE) continue;
+                                        size_t sno = MLIR_GetBlockNumOps(ctx, scan_blks[bi]);
+                                        for (size_t oi = 0; oi + 1 < sno; oi++) {
+                                            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, scan_blks[bi], oi);
+                                            if (x64_op_rematerialized(ctx, op)) continue;
+                                            MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+                                            if (ot == OP_TYPE_LLVM_GEP && gep_op == MLIR_INVALID_HANDLE)
+                                                gep_op = op;
+                                            else if (ot == OP_TYPE_LLVM_STORE && st_op == MLIR_INVALID_HANDLE)
+                                                st_op = op;
+                                            else if (ot == OP_TYPE_LLVM_ADD && add_op == MLIR_INVALID_HANDLE)
+                                                add_op = op;
+                                            else { ok_fill = false; break; }
+                                        }
+                                    }
+                                    if (ok_fill && gep_op != MLIR_INVALID_HANDLE &&
+                                        st_op != MLIR_INVALID_HANDLE && add_op != MLIR_INVALID_HANDLE &&
+                                        MLIR_GetOpResult(ctx, add_op, 0) == iv_next) {
+                                        // Verify add_op is `iv + 1`
+                                        int64_t step_c = 0;
+                                        bool ok_step = (MLIR_GetOpOperand(ctx, add_op, 0) == iv &&
+                                                        is_const(ctx, MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, add_op, 1)), &step_c) &&
+                                                        step_c == 1);
+                                        // Verify store is 1-byte constant to gep_op result
+                                        int64_t fill_c = 0;
+                                        MLIR_ValueHandle st_v = MLIR_GetOpOperand(ctx, st_op, 0);
+                                        bool ok_st = (MLIR_GetOpOperand(ctx, st_op, 1) == MLIR_GetOpResult(ctx, gep_op, 0) &&
+                                                      type_bytes(ctx, st_v) == 1 &&
+                                                      is_const(ctx, MLIR_GetValueDefiningOp(ctx, st_v), &fill_c));
+                                        // Verify gep is 1-byte stride indexed by iv
+                                        bool ok_gep = false;
+                                        MLIR_ValueHandle base_v = MLIR_GetOpOperand(ctx, gep_op, 0);
+                                        if (ok_step && ok_st && MLIR_GetOpNumOperands(ctx, gep_op) == 2 &&
+                                            MLIR_GetOpOperand(ctx, gep_op, 1) == iv) {
+                                            MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, gep_op, MLIR_KEY_ELEM_TYPE);
+                                            MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, gep_op, MLIR_KEY_RAW_CONSTANT_INDICES);
+                                            if (eta && ria) {
+                                                MLIR_TypeHandle ety = MLIR_GetAttributeTypeValue(ctx, eta);
+                                                int32_t cidx[8];
+                                                size_t n_idx = MLIR_GetAttributeDenseI32(ctx, ria, cidx, 8);
+                                                if (n_idx == 1 && cidx[0] == (int32_t)0x80000000 && x64_type_size(ctx, ety) == 1)
+                                                    ok_gep = true;
+                                                else if (n_idx == 2 && cidx[0] == 0 && cidx[1] == (int32_t)0x80000000 &&
+                                                         MLIR_GetTypeKind(ctx, ety) == MLIR_TYPE_KIND_LLVM_ARRAY &&
+                                                         x64_type_size(ctx, MLIR_GetTypeElement(ctx, ety)) == 1)
+                                                    ok_gep = true;
+                                            }
+                                        }
+                                        // Verify iv is not used outside {b, body_bi, latch_bi} and base_v is loop-invariant.
+                                        if (ok_gep) {
+                                            bool iv_escapes = false;
+                                            for (size_t ob = 0; ob < nb && !iv_escapes; ob++) {
+                                                if (ob == b || (int)ob == body_bi || (int)ob == latch_bi) continue;
+                                                MLIR_BlockHandle obk = MLIR_GetRegionBlock(ctx, reg, ob);
+                                                size_t ono = MLIR_GetBlockNumOps(ctx, obk);
+                                                for (size_t oi = 0; oi < ono && !iv_escapes; oi++) {
+                                                    MLIR_OpHandle oop = MLIR_GetBlockOp(ctx, obk, oi);
+                                                    size_t onop = MLIR_GetOpNumOperands(ctx, oop);
+                                                    for (size_t k = 0; k < onop; k++)
+                                                        if (MLIR_GetOpOperand(ctx, oop, k) == iv) { iv_escapes = true; break; }
+                                                    if (oi + 1 == ono && !iv_escapes) {
+                                                        size_t ons = MLIR_GetOpNumSuccessors(ctx, oop);
+                                                        for (size_t si = 0; si < ons && !iv_escapes; si++) {
+                                                            size_t onso = MLIR_GetOpNumSuccessorOperands(ctx, oop, si);
+                                                            for (size_t k = 0; k < onso; k++)
+                                                                if (MLIR_GetOpSuccessorOperand(ctx, oop, si, k) == iv) { iv_escapes = true; break; }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if (!iv_escapes) {
+                                                skip_blk[body_bi] = 1;
+                                                if (latch_bi >= 0) skip_blk[latch_bi] = 1;
+                                                int w = (iv_ib > 32) ? 1 : 0;
+                                                load_val_w(&F, limit, RCX, w);
+                                                load_val_w(&F, iv, RAX, w);
+                                                alu_rr(&F, 0x29 /*sub*/, RCX, RAX, w);
+                                                if (pred0 == 3 /*sle*/) alu_ri(&F, 0 /*add*/, RCX, 1, w);
+                                                alu_ri(&F, 7 /*cmp*/, RCX, 0, w);
+                                                x64_emit1(&F, OP_TYPE_X64_JCC, (int64_t)CC_LE | ((int64_t)exit_bi << 32));
+                                                if (w == 0)
+                                                    x64_emit1(&F, OP_TYPE_X64_MOVSX, (int64_t)RAX | ((int64_t)RAX << 4) | (32ll << 8));
+                                                x64_emit1(&F, OP_TYPE_X64_PUSH_R, RDI);
+                                                int32_t baoff;
+                                                if (alloca_slot(&F, base_v, &baoff)) lea_rbp(&F, RDI, baoff);
+                                                else                                 load_val_w(&F, base_v, RDI, 1);
+                                                alu_rr(&F, 0x01 /*add*/, RDI, RAX, 1);
+                                                mov_ri(&F, RAX, (int64_t)(uint8_t)fill_c, 0);
+                                                x64_emit0(&F, OP_TYPE_X64_REP_STOSB);
+                                                x64_emit1(&F, OP_TYPE_X64_POP_R, RDI);
+                                                x64_emit1(&F, OP_TYPE_X64_JMP, (int64_t)exit_bi);
+                                                emitted_jtab = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Dense switch jump-table detection:
             // Recognize a chain of single-predecessor `icmp eq(sw_val, c_i) -> cond_br`
             // blocks with 0 successor operands and >= 5 dense cases (span <= 512, density >= 50%).

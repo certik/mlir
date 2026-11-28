@@ -1044,3 +1044,189 @@ void mlir_llvm_tre(MLIR_Context *ctx, MLIR_OpHandle module) {
         tre_func(ctx, fn);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Simplify-CFG: thread branches through empty forwarding blocks & erase dead
+// unreachable blocks.
+// ---------------------------------------------------------------------------
+static void simplify_cfg_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
+    if (MLIR_GetOpNumRegions(ctx, fn) == 0) return;
+    MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
+    size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    if (nb < 3) return;
+
+    MLIR_BlockHandle entry = MLIR_GetRegionBlock(ctx, reg, 0);
+
+    for (int iter = 0; iter < 4; iter++) {
+        bool changed = false;
+        nb = MLIR_GetRegionNumBlocks(ctx, reg);
+        for (size_t b = 0; b < nb; b++) {
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            if (no == 0) continue;
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            MLIR_OpType tt = MLIR_GetOpType(ctx, term);
+            if (tt != OP_TYPE_LLVM_BR && tt != OP_TYPE_LLVM_COND_BR) continue;
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+            bool need_rebuild = false;
+            MLIR_BlockHandle new_succ[2];
+            MLIR_ValueHandle new_sops[2][64];
+            uint32_t new_nso[2];
+            for (size_t si = 0; si < ns && si < 2; si++) {
+                MLIR_BlockHandle tgt = MLIR_GetOpSuccessor(ctx, term, si);
+                size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, term, si);
+                new_succ[si] = tgt;
+                new_nso[si] = (uint32_t)nso;
+                if (nso <= 64) {
+                    for (size_t k = 0; k < nso; k++)
+                        new_sops[si][k] = MLIR_GetOpSuccessorOperand(ctx, term, si, k);
+                }
+                if (tgt == entry || tgt == bk || nso > 64) continue;
+                if (MLIR_GetBlockNumOps(ctx, tgt) != 1) continue;
+                MLIR_OpHandle tterm = MLIR_GetBlockOp(ctx, tgt, 0);
+                if (MLIR_GetOpType(ctx, tterm) != OP_TYPE_LLVM_BR) continue;
+                MLIR_BlockHandle dst = MLIR_GetOpSuccessor(ctx, tterm, 0);
+                if (dst == tgt) continue;
+                size_t tnso = MLIR_GetOpNumSuccessorOperands(ctx, tterm, 0);
+                if (tnso > 64) continue;
+                // Avoid creating a cond_br with both arms going to the same block.
+                if (tt == OP_TYPE_LLVM_COND_BR) {
+                    MLIR_BlockHandle other = MLIR_GetOpSuccessor(ctx, term, 1 - si);
+                    if (other == dst) continue;
+                }
+                size_t tna = MLIR_GetBlockNumArgs(ctx, tgt);
+                if (tna != nso) continue;
+                // Ensure none of tgt's block args are referenced outside tgt's terminator
+                // (otherwise bypassing tgt would break SSA dominance).
+                bool arg_escapes = false;
+                if (tna > 0) {
+                    for (size_t ob = 0; ob < nb && !arg_escapes; ob++) {
+                        MLIR_BlockHandle obk = MLIR_GetRegionBlock(ctx, reg, ob);
+                        if (obk == tgt) continue;
+                        size_t ono = MLIR_GetBlockNumOps(ctx, obk);
+                        for (size_t oi = 0; oi < ono && !arg_escapes; oi++) {
+                            MLIR_OpHandle oop = MLIR_GetBlockOp(ctx, obk, oi);
+                            size_t onop = MLIR_GetOpNumOperands(ctx, oop);
+                            for (size_t k = 0; k < onop && !arg_escapes; k++) {
+                                MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, oop, k);
+                                for (size_t a = 0; a < tna; a++)
+                                    if (ov == MLIR_GetBlockArg(ctx, tgt, a)) { arg_escapes = true; break; }
+                            }
+                            if (oi + 1 == ono && !arg_escapes) {
+                                size_t ons = MLIR_GetOpNumSuccessors(ctx, oop);
+                                for (size_t osi = 0; osi < ons && !arg_escapes; osi++) {
+                                    size_t onso = MLIR_GetOpNumSuccessorOperands(ctx, oop, osi);
+                                    for (size_t k = 0; k < onso && !arg_escapes; k++) {
+                                        MLIR_ValueHandle ov = MLIR_GetOpSuccessorOperand(ctx, oop, osi, k);
+                                        for (size_t a = 0; a < tna; a++)
+                                            if (ov == MLIR_GetBlockArg(ctx, tgt, a)) { arg_escapes = true; break; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (arg_escapes) continue;
+                for (size_t k = 0; k < tnso; k++) {
+                    MLIR_ValueHandle v = MLIR_GetOpSuccessorOperand(ctx, tterm, 0, k);
+                    for (size_t a = 0; a < tna; a++) {
+                        if (v == MLIR_GetBlockArg(ctx, tgt, a)) {
+                            v = MLIR_GetOpSuccessorOperand(ctx, term, si, a);
+                            break;
+                        }
+                    }
+                    new_sops[si][k] = v;
+                }
+                new_succ[si] = dst;
+                new_nso[si] = (uint32_t)tnso;
+                need_rebuild = true;
+            }
+            if (!need_rebuild) continue;
+            if (tt == OP_TYPE_LLVM_COND_BR && new_succ[0] == new_succ[1]) continue;
+
+            MLIR_ValueHandle flat_ops[129];
+            size_t n_flat = 0;
+            if (tt == OP_TYPE_LLVM_COND_BR) {
+                flat_ops[n_flat++] = MLIR_GetOpOperand(ctx, term, 0);
+            }
+            for (size_t si = 0; si < ns; si++) {
+                for (size_t k = 0; k < new_nso[si]; k++)
+                    flat_ops[n_flat++] = new_sops[si][k];
+            }
+            MLIR_OpSpec sp;
+            memset(&sp, 0, sizeof(sp));
+            sp.type = tt;
+            sp.operands = flat_ops;
+            sp.n_operands = n_flat;
+            sp.successors = new_succ;
+            sp.n_successors = ns;
+            sp.successor_operand_counts = new_nso;
+            MLIR_OpHandle nt = MLIR_CreateOpFromSpec(ctx, &sp);
+            MLIR_InsertBlockOpAtIndex(ctx, bk, nt, no - 1);
+            MLIR_DetachOp(ctx, term);
+            changed = true;
+        }
+        if (!changed) break;
+    }
+
+    // BFS from entry block and erase unreachable blocks.
+    nb = MLIR_GetRegionNumBlocks(ctx, reg);
+    if (nb <= 1) return;
+    size_t hcap = 16;
+    while (hcap < nb * 2) hcap *= 2;
+    uintptr_t *hk = (uintptr_t *)calloc(hcap, sizeof(uintptr_t));
+    int32_t   *hv = (int32_t   *)malloc(hcap * sizeof(int32_t));
+    uint8_t   *vis = (uint8_t  *)calloc(nb, 1);
+    size_t    *q   = (size_t   *)malloc(nb * sizeof(size_t));
+    if (hk && hv && vis && q) {
+        size_t hmask = hcap - 1;
+        for (size_t b = 0; b < nb; b++) {
+            uintptr_t k = (uintptr_t)MLIR_GetRegionBlock(ctx, reg, b);
+            size_t s = (k * 1099511628211ull) & hmask;
+            while (hk[s]) s = (s + 1) & hmask;
+            hk[s] = k; hv[s] = (int32_t)b;
+        }
+        size_t qh = 0, qt = 0;
+        vis[0] = 1; q[qt++] = 0;
+        while (qh < qt) {
+            size_t b = q[qh++];
+            MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+            size_t no = MLIR_GetBlockNumOps(ctx, bk);
+            if (no == 0) continue;
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            size_t ns = MLIR_GetOpNumSuccessors(ctx, term);
+            for (size_t si = 0; si < ns; si++) {
+                uintptr_t sk = (uintptr_t)MLIR_GetOpSuccessor(ctx, term, si);
+                size_t s = (sk * 1099511628211ull) & hmask;
+                while (hk[s]) {
+                    if (hk[s] == sk) {
+                        size_t tb = (size_t)hv[s];
+                        if (!vis[tb]) { vis[tb] = 1; q[qt++] = tb; }
+                        break;
+                    }
+                    s = (s + 1) & hmask;
+                }
+            }
+        }
+        for (size_t b = nb; b-- > 1; ) {
+            if (!vis[b]) {
+                MLIR_EraseBlock(ctx, MLIR_GetRegionBlock(ctx, reg, b));
+            }
+        }
+    }
+    free(hk); free(hv); free(vis); free(q);
+}
+
+void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module) {
+    if (getenv("TINYC_NO_SIMPLIFY_CFG")) return;
+    if (MLIR_GetOpNumRegions(ctx, module) == 0) return;
+    MLIR_RegionHandle mr = MLIR_GetOpRegion(ctx, module, 0);
+    if (MLIR_GetRegionNumBlocks(ctx, mr) == 0) return;
+    MLIR_BlockHandle mb = MLIR_GetRegionBlock(ctx, mr, 0);
+    size_t n = MLIR_GetBlockNumOps(ctx, mb);
+    for (size_t i = 0; i < n; i++) {
+        MLIR_OpHandle fn = MLIR_GetBlockOp(ctx, mb, i);
+        if (MLIR_GetOpType(ctx, fn) != OP_TYPE_LLVM_FUNC) continue;
+        simplify_cfg_func(ctx, fn);
+    }
+}

@@ -18,6 +18,9 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module);
 // Tail-recursion elimination (direct + accumulator ADD/MUL) on flat `llvm` CFGs.
 void mlir_llvm_tre(MLIR_Context *ctx, MLIR_OpHandle module);
 
+// Simplify-CFG: thread branches through empty forwarding blocks & remove dead blocks.
+void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module);
+
 #ifdef __cplusplus
 }
 #endif

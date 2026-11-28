@@ -305,6 +305,8 @@ typedef struct {
     int32_t       cs_base;   // rbp offset base of the callee-saved spill area
     int           n_cs;      // # of callee-saved regs to save/restore
     uint8_t       cs_reg[8]; // those registers, in save order
+    bool          omit_fp;   // true when frame pointer (rbp) is omitted
+    bool          fp_pad;    // true when omit_fp needs 8-byte rsp alignment pad for calls
     // intra-function branch fixups (used by x64_encode_block)
     BrFix        *fix; size_t n_fix, c_fix;
     X64JTab      *jtabs; size_t n_jtabs, c_jtabs;
