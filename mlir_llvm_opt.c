@@ -847,13 +847,13 @@ static bool inl_check_candidate(MLIR_Context *ctx, MLIR_OpHandle fn, InlCand *ou
         MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
         size_t no = MLIR_GetBlockNumOps(ctx, bk);
         total_ops += no;
-        if (total_ops > 160) return false;
+        if (total_ops > 180) return false;
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (MLIR_GetOpNumRegions(ctx, op) > 0) return false;
             MLIR_OpType t = MLIR_GetOpType(ctx, op);
             if (t == OP_TYPE_LLVM_INTR_VASTART || t == OP_TYPE_LLVM_INTR_VAEND ||
-                t == OP_TYPE_LLVM_INTR_VACOPY)
+                t == OP_TYPE_LLVM_INTR_VACOPY || t == OP_TYPE_LLVM_UNREACHABLE)
                 return false;
             if (t == OP_TYPE_LLVM_ALLOCA) has_alloca = true;
             if (t == OP_TYPE_LLVM_CALL || t == OP_TYPE_FUNC_CALL) {
@@ -1216,8 +1216,8 @@ void mlir_llvm_inline(MLIR_Context *ctx, MLIR_OpHandle module) {
                 caller_ops += MLIR_GetBlockNumOps(ctx, MLIR_GetRegionBlock(ctx, creg, b));
             bool is_large_caller = (caller_ops > 2000);
             if (caller_ops > 8000) continue;
-            size_t caller_lim = is_large_caller ? 10000 : 2000;
-            int max_inl = is_large_caller ? 32 : 20;
+            size_t caller_lim = is_large_caller ? 12000 : 2000;
+            int max_inl = is_large_caller ? 64 : 20;
 
             int n_inlined = 0;
             for (size_t b = 0; b < MLIR_GetRegionNumBlocks(ctx, creg) && caller_ops <= caller_lim && n_inlined < max_inl; b++) {
