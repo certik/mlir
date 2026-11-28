@@ -307,6 +307,11 @@ typedef struct {
     MLIR_Builder     x64_bd;
     MLIR_TypeHandle  x64_i64;
     int              x64_next_label;
+    // Per-value use counts (clamped at 2) when !fast_ra and def-use tracking is off,
+    // so icmp -> cond_br fusion works at -O1/-O2.
+    uint8_t         *use_cnt;
+    uintptr_t        use_base;
+    size_t           use_len;
 } FnCtx;
 
 static inline void x64_emit0(FnCtx *F, MLIR_OpType t) {
@@ -752,6 +757,34 @@ static bool is_const(MLIR_Context *ctx, MLIR_OpHandle def, int64_t *val) {
     case OP_TYPE_LLVM_MLIR_ZERO:
     case OP_TYPE_LLVM_MLIR_NULL:
         *val = 0; return true;
+    case OP_TYPE_LLVM_SEXT: {
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, def, 0);
+        int64_t c = 0;
+        if (!is_const(ctx, MLIR_GetValueDefiningOp(ctx, a0), &c)) return false;
+        int sb = int_bits(ctx, a0);
+        if (sb > 0 && sb < 64) {
+            uint64_t mask = (1ull << sb) - 1ull;
+            uint64_t sign = 1ull << (sb - 1);
+            c = (int64_t)(((uint64_t)c & mask) ^ sign) - (int64_t)sign;
+        }
+        *val = c; return true;
+    }
+    case OP_TYPE_LLVM_ZEXT: {
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, def, 0);
+        int64_t c = 0;
+        if (!is_const(ctx, MLIR_GetValueDefiningOp(ctx, a0), &c)) return false;
+        int sb = int_bits(ctx, a0);
+        if (sb > 0 && sb < 64) c = (int64_t)((uint64_t)c & ((1ull << sb) - 1ull));
+        *val = c; return true;
+    }
+    case OP_TYPE_LLVM_TRUNC: {
+        MLIR_ValueHandle a0 = MLIR_GetOpOperand(ctx, def, 0);
+        int64_t c = 0;
+        if (!is_const(ctx, MLIR_GetValueDefiningOp(ctx, a0), &c)) return false;
+        int rb = int_bits(ctx, MLIR_GetOpResult(ctx, def, 0));
+        if (rb > 0 && rb < 64) c = (int64_t)((uint64_t)c & ((1ull << rb) - 1ull));
+        *val = c; return true;
+    }
     default:
         return false;
     }
