@@ -298,9 +298,21 @@ static void store_mem_xmm(FnCtx *F, uint8_t addr, uint8_t xs, int is_ss) {
     eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xs, 0, addr); eb(F, 0x0F); eb(F, 0x11); modrm_mem0(F, xs, addr);
 }
 static void load_mem_xmm_disp(FnCtx *F, uint8_t xd, uint8_t base, int is_ss, int32_t disp) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LOAD_MEM_XMM_DISP,
+                  (int64_t)xd | ((int64_t)base << 4) | ((int64_t)(is_ss ? 1 : 0) << 8) |
+                  ((int64_t)(uint32_t)disp << 32));
+        return;
+    }
     eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xd, 0, base); eb(F, 0x0F); eb(F, 0x10); modrm_mem_disp(F, xd, base, disp);
 }
 static void store_mem_xmm_disp(FnCtx *F, uint8_t base, uint8_t xs, int is_ss, int32_t disp) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_STORE_MEM_XMM_DISP,
+                  (int64_t)base | ((int64_t)xs << 4) | ((int64_t)(is_ss ? 1 : 0) << 8) |
+                  ((int64_t)(uint32_t)disp << 32));
+        return;
+    }
     eb(F, is_ss ? 0xF3 : 0xF2); rex(F, 0, xs, 0, base); eb(F, 0x0F); eb(F, 0x11); modrm_mem_disp(F, xs, base, disp);
 }
 static void load_mem_xmm_sib(FnCtx *F, uint8_t xd, uint8_t base, uint8_t idx, int scale, int is_ss) {
@@ -617,6 +629,44 @@ static bool lower_fp_op(FnCtx *F, MLIR_OpHandle op, MLIR_OpType ty) {
     default: break;
     }
     return false;
+}
+
+// Compute the constant byte offset of a 1-operand `llvm.getelementptr` (all
+// constant indices). Returns true iff the offset is constant and fits in
+// [-1073741824, 1073741823] (safe for both [base+disp] and [rbp-(aoff-disp)]).
+static bool x64_gep_const_offset(MLIR_Context *ctx, MLIR_OpHandle op, int64_t *out_off) {
+    if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_GEP) return false;
+    if (MLIR_GetOpNumOperands(ctx, op) != 1) return false;
+    MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
+    MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
+    if (!eta || !ria) return false;
+    MLIR_TypeHandle elem_ty = MLIR_GetAttributeTypeValue(ctx, eta);
+    int32_t cidx[64];
+    size_t n_idx = MLIR_GetAttributeDenseI32(ctx, ria, cidx, 64);
+    if (n_idx == 0 || n_idx > 64) return false;
+    int64_t total = 0;
+    MLIR_TypeHandle cur_ty = elem_ty;
+    for (size_t i = 0; i < n_idx; i++) {
+        int32_t ci = cidx[i];
+        if (ci == (int32_t)0x80000000) return false;
+        if (i == 0) {
+            if (ci != 0) total += (int64_t)ci * (int64_t)x64_type_size(ctx, elem_ty);
+        } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_STRUCT) {
+            MLIR_TypeHandle next_ty = MLIR_INVALID_HANDLE;
+            unsigned foff = x64_struct_field_info(ctx, cur_ty, (size_t)ci, &next_ty);
+            cur_ty = next_ty;
+            total += (int64_t)foff;
+        } else if (MLIR_GetTypeKind(ctx, cur_ty) == MLIR_TYPE_KIND_LLVM_ARRAY) {
+            MLIR_TypeHandle et = MLIR_GetTypeElement(ctx, cur_ty);
+            cur_ty = et;
+            if (ci != 0) total += (int64_t)ci * (int64_t)x64_type_size(ctx, et);
+        } else {
+            return false;
+        }
+    }
+    if (total < -1073741824ll || total > 1073741823ll) return false;
+    *out_off = total;
+    return true;
 }
 
 // Recover a value's home (physical reg or rbp-relative stack slot) for parallel-move
@@ -1227,15 +1277,28 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
         MLIR_ValueHandle addr = MLIR_GetOpOperand(ctx, op, 0);
         int nb = type_bytes(ctx, r);
+        int32_t disp = 0;
+        if (F->has_gep_skip) {
+            int32_t dmy = 0;
+            if (sm_get(&F->gep_skip, addr, &dmy)) {
+                MLIR_OpHandle gdef = MLIR_GetValueDefiningOp(ctx, addr);
+                int64_t goff = 0;
+                if (gdef != MLIR_INVALID_HANDLE && x64_gep_const_offset(ctx, gdef, &goff)) {
+                    disp = (int32_t)goff;
+                    addr = MLIR_GetOpOperand(ctx, gdef, 0);
+                }
+            }
+        }
         uint8_t xD;
         if (fp_bytes(ctx, r) && val_in_xmm(F, r, &xD)) {
             int is_ss = (nb == 4);
             int32_t aoff;
             if (alloca_slot(F, addr, &aoff)) {
-                load_rbp_xmm(F, xD, aoff, is_ss);
+                load_rbp_xmm(F, xD, aoff - disp, is_ss);
             } else {
                 uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
-                load_mem_xmm(F, xD, ra, is_ss);
+                if (disp == 0) load_mem_xmm(F, xD, ra, is_ss);
+                else           load_mem_xmm_disp(F, xD, ra, is_ss, disp);
             }
             return;
         }
@@ -1244,10 +1307,11 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         uint8_t dst = has_rD ? rD : RAX;
         int32_t aoff;
         if (alloca_slot(F, addr, &aoff)) {
-            load_rbp_sized(F, dst, aoff, nb);
+            load_rbp_sized(F, dst, aoff - disp, nb);
         } else {
             uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
-            load_mem(F, dst, ra, nb, false);
+            if (disp == 0) load_mem(F, dst, ra, nb, false);
+            else           load_mem_disp(F, dst, ra, nb, false, disp);
         }
         if (!has_rD) store_val_w(F, r, dst, nb > 4 ? 1 : 0);
         return;
@@ -1256,30 +1320,48 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
         MLIR_ValueHandle val = MLIR_GetOpOperand(ctx, op, 0);
         MLIR_ValueHandle addr = MLIR_GetOpOperand(ctx, op, 1);
         int nb = type_bytes(ctx, val);
+        int32_t disp = 0;
+        if (F->has_gep_skip) {
+            int32_t dmy = 0;
+            if (sm_get(&F->gep_skip, addr, &dmy)) {
+                MLIR_OpHandle gdef = MLIR_GetValueDefiningOp(ctx, addr);
+                int64_t goff = 0;
+                if (gdef != MLIR_INVALID_HANDLE && x64_gep_const_offset(ctx, gdef, &goff)) {
+                    disp = (int32_t)goff;
+                    addr = MLIR_GetOpOperand(ctx, gdef, 0);
+                }
+            }
+        }
         uint8_t xS;
         if (fp_bytes(ctx, val) && val_in_xmm(F, val, &xS)) {
             int is_ss = (nb == 4);
             int32_t aoff;
             if (alloca_slot(F, addr, &aoff)) {
-                store_rbp_xmm(F, aoff, xS, is_ss);
+                store_rbp_xmm(F, aoff - disp, xS, is_ss);
             } else {
                 uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
-                store_mem_xmm(F, ra, xS, is_ss);
+                if (disp == 0) store_mem_xmm(F, ra, xS, is_ss);
+                else           store_mem_xmm_disp(F, ra, xS, is_ss, disp);
             }
             return;
         }
         uint8_t rv = val_reg_or_load(F, val, R11, nb > 4 ? 1 : 0);
         int32_t aoff;
         if (alloca_slot(F, addr, &aoff)) {
-            store_rbp_sized(F, aoff, rv, nb);
+            store_rbp_sized(F, aoff - disp, rv, nb);
         } else {
             uint8_t ra = val_reg_or_load(F, addr, RCX, 1);
-            store_mem(F, ra, rv, nb);
+            if (disp == 0) store_mem(F, ra, rv, nb);
+            else           store_mem_disp(F, ra, rv, nb, disp);
         }
         return;
     }
     case OP_TYPE_LLVM_GEP: {
         MLIR_ValueHandle r = MLIR_GetOpResult(ctx, op, 0);
+        if (F->has_gep_skip) {
+            int32_t dmy = 0;
+            if (sm_get(&F->gep_skip, r, &dmy)) return;
+        }
         MLIR_AttributeHandle eta = MLIR_GetOpAttr(ctx, op, MLIR_KEY_ELEM_TYPE);
         MLIR_AttributeHandle ria = MLIR_GetOpAttr(ctx, op, MLIR_KEY_RAW_CONSTANT_INDICES);
         if (!eta || !ria) { fail(F, "getelementptr missing elem_type/indices", (string){0}); return; }
@@ -3827,6 +3909,142 @@ static void x64_alloc_xmm(FnCtx *F, MLIR_RegionHandle reg, size_t nb) {
     free(fp_val); free(fp_hint); free(fp_def); free(fp_end); free(fp_bad); free(fp_reg);
 }
 
+// Build the per-function set of values whose defining ops emit ZERO code and
+// need ZERO register/spill-slot in mlir_regalloc_global:
+//  1) Constant-offset GEPs used ONLY as the address operand of LOAD / STORE.
+//  2) Single-use ICMPs directly feeding COND_BR at block tail.
+static void x64_build_remat_skip(MLIR_Context *ctx, MLIR_RegionHandle reg, size_t nb,
+                                 SlotMap *out_skip, bool *out_has) {
+    *out_has = false;
+    size_t cap = 64;
+    MLIR_ValueHandle *cand = NULL;
+    uint8_t *kind = NULL; // 1 = gep, 2 = icmp
+    uint8_t *bad  = NULL;
+    size_t n_cand = 0;
+
+    // Pass 1: collect candidate folded GEPs and fused ICMPs.
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        MLIR_OpHandle tail_icmp = MLIR_INVALID_HANDLE;
+        if (no >= 2) {
+            MLIR_OpHandle term = MLIR_GetBlockOp(ctx, bk, no - 1);
+            if (MLIR_GetOpType(ctx, term) == OP_TYPE_LLVM_COND_BR) {
+                MLIR_ValueHandle cond = MLIR_GetOpOperand(ctx, term, 0);
+                MLIR_OpHandle prev = MLIR_GetBlockOp(ctx, bk, no - 2);
+                if (MLIR_GetOpType(ctx, prev) == OP_TYPE_LLVM_ICMP &&
+                    MLIR_GetOpResult(ctx, prev, 0) == cond) {
+                    tail_icmp = prev;
+                }
+            }
+        }
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            int k = 0;
+            if (op == tail_icmp) {
+                k = 2;
+            } else if (MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_GEP) {
+                int64_t off = 0;
+                if (x64_gep_const_offset(ctx, op, &off)) k = 1;
+            }
+            if (k != 0) {
+                if (n_cand == 0) {
+                    cand = (MLIR_ValueHandle *)malloc(cap * sizeof(MLIR_ValueHandle));
+                    kind = (uint8_t *)malloc(cap);
+                    bad  = (uint8_t *)calloc(cap, 1);
+                } else if (n_cand == cap) {
+                    cap *= 2;
+                    cand = (MLIR_ValueHandle *)realloc(cand, cap * sizeof(MLIR_ValueHandle));
+                    kind = (uint8_t *)realloc(kind, cap);
+                    bad  = (uint8_t *)realloc(bad, cap);
+                    memset(bad + n_cand, 0, cap - n_cand);
+                }
+                cand[n_cand] = MLIR_GetOpResult(ctx, op, 0);
+                kind[n_cand] = (uint8_t)k;
+                bad[n_cand]  = 0;
+                n_cand++;
+            }
+        }
+    }
+    if (n_cand == 0) return;
+
+    // Build open-addressed hash table: value -> index in cand[].
+    size_t hcap = 16;
+    while (hcap < n_cand * 2) hcap *= 2;
+    uintptr_t *hk = (uintptr_t *)calloc(hcap, sizeof(uintptr_t));
+    uint32_t  *hv = (uint32_t  *)malloc(hcap * sizeof(uint32_t));
+    uint8_t   *ic_uses = (uint8_t *)calloc(n_cand, 1);
+    size_t hmask = hcap - 1;
+    for (size_t i = 0; i < n_cand; i++) {
+        uintptr_t key = (uintptr_t)cand[i];
+        size_t s = (key * 1099511628211ull) & hmask;
+        while (hk[s]) s = (s + 1) & hmask;
+        hk[s] = key; hv[s] = (uint32_t)i;
+    }
+
+    // Pass 2: verify every use of each candidate.
+    for (size_t b = 0; b < nb; b++) {
+        MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
+        size_t no = MLIR_GetBlockNumOps(ctx, bk);
+        for (size_t i = 0; i < no; i++) {
+            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
+            MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+            size_t nop = MLIR_GetOpNumOperands(ctx, op);
+            for (size_t k = 0; k < nop; k++) {
+                uintptr_t uv = (uintptr_t)MLIR_GetOpOperand(ctx, op, k);
+                size_t s = (uv * 1099511628211ull) & hmask;
+                while (hk[s]) {
+                    if (hk[s] == uv) {
+                        uint32_t ci = hv[s];
+                        if (kind[ci] == 1) {
+                            // GEP: allowed ONLY as LOAD op0 or STORE op1!
+                            bool ok = (ot == OP_TYPE_LLVM_LOAD && k == 0) ||
+                                      (ot == OP_TYPE_LLVM_STORE && k == 1);
+                            if (!ok) bad[ci] = 1;
+                        } else {
+                            // ICMP: allowed ONLY once, as COND_BR op0!
+                            if (ot == OP_TYPE_LLVM_COND_BR && k == 0) {
+                                ic_uses[ci]++;
+                                if (ic_uses[ci] > 1) bad[ci] = 1;
+                            } else {
+                                bad[ci] = 1;
+                            }
+                        }
+                        break;
+                    }
+                    s = (s + 1) & hmask;
+                }
+            }
+            if (i + 1 == no) {
+                size_t ns = MLIR_GetOpNumSuccessors(ctx, op);
+                for (size_t si = 0; si < ns; si++) {
+                    size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, op, si);
+                    for (size_t k = 0; k < nso; k++) {
+                        uintptr_t uv = (uintptr_t)MLIR_GetOpSuccessorOperand(ctx, op, si, k);
+                        size_t s = (uv * 1099511628211ull) & hmask;
+                        while (hk[s]) {
+                            if (hk[s] == uv) { bad[hv[s]] = 1; break; }
+                            s = (s + 1) & hmask;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    size_t n_good = 0;
+    for (size_t i = 0; i < n_cand; i++) {
+        if (!bad[i]) {
+            sm_put(out_skip, cand[i], (int32_t)kind[i]);
+            n_good++;
+        }
+    }
+    if (n_good > 0) *out_has = true;
+
+    free(hk); free(hv); free(ic_uses);
+    free(cand); free(kind); free(bad);
+}
+
 static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                              SymSet *refs, MLIR_BlockHandle retain_blk) {
     FnCtx F; memset(&F, 0, sizeof(F));
@@ -3923,11 +4141,17 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
             T.ncaller = nc;
             T.npool = np;
         }
+        if (!use_fast && g_x64_opt_level >= 1) {
+            F.gep_skip.arena = MLIR_GetArenaAllocator(ctx);
+            x64_build_remat_skip(ctx, reg, nb, &F.gep_skip, &F.has_gep_skip);
+            if (F.has_gep_skip) T.remat_skip = &F.gep_skip;
+        }
         uint32_t um = use_fast
             ? mlir_regalloc_fast(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T)
             : mlir_regalloc_global(ctx, reg, nb, &F.rm, &sm_spill, &nslots, &T);
         if (um != RA_BAIL) F.fast_ra = use_fast;
         if (um == RA_BAIL) {
+            F.has_gep_skip = false;
             memset(&F.rm, 0, sizeof(F.rm));
             F.rm.arena = MLIR_GetArenaAllocator(ctx);
             memset(&sm_spill, 0, sizeof(sm_spill));

@@ -298,6 +298,8 @@ typedef struct {
     SlotMap       rm;
     SlotMap       xrm;       // FP value -> XMM register (2..15, caller-saved)
     bool          has_xrm;
+    SlotMap       gep_skip;  // folded const-offset GEPs & fused ICMPs (no reg/slot)
+    bool          has_gep_skip;
     SlotMap       spill;
     bool          has_spill;
     bool          fast_ra;   // true when mlir_regalloc_fast ran (never maps remat ops)
@@ -675,12 +677,24 @@ static inline void modrm_mem_sib(FnCtx *F, uint8_t reg, uint8_t base, uint8_t id
     }
 }
 static void load_mem_disp(FnCtx *F, uint8_t dst, uint8_t base, int bytes, bool sgn, int32_t disp) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_LOAD_MEM_DISP,
+                  (int64_t)dst | ((int64_t)base << 4) | ((int64_t)bytes << 8) |
+                  ((int64_t)(sgn ? 1 : 0) << 12) | ((int64_t)(uint32_t)disp << 32));
+        return;
+    }
     if (bytes == 8)      { rex(F,1,dst,0,base); eb(F,0x8B); modrm_mem_disp(F,dst,base,disp); }
     else if (bytes == 4) { rex(F,0,dst,0,base); eb(F,0x8B); modrm_mem_disp(F,dst,base,disp); }
     else if (bytes == 2) { rex(F,1,dst,0,base); eb(F,0x0F); eb(F, sgn?0xBF:0xB7); modrm_mem_disp(F,dst,base,disp); }
     else                 { rex(F,1,dst,0,base); eb(F,0x0F); eb(F, sgn?0xBE:0xB6); modrm_mem_disp(F,dst,base,disp); }
 }
 static void store_mem_disp(FnCtx *F, uint8_t base, uint8_t src, int bytes, int32_t disp) {
+    if (F->x64_blk) {
+        x64_emit1(F, OP_TYPE_X64_STORE_MEM_DISP,
+                  (int64_t)base | ((int64_t)src << 4) | ((int64_t)bytes << 8) |
+                  ((int64_t)(uint32_t)disp << 32));
+        return;
+    }
     if (bytes == 1) {
         if (src >= 4 && src < 8 && base < 8) eb(F, 0x40);
         else rex(F,0,src,0,base);

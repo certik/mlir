@@ -652,7 +652,7 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
     if (nv_max == 0) return 0;
     {
         size_t bwg = a64_bs_words(nv_max);
-        if (nv_max > 100000u || (uint64_t)n_blocks * (uint64_t)bwg > 4000000ull) {
+        if (nv_max > 100000u || (uint64_t)n_blocks * (uint64_t)bwg > 16000000ull) {
             return RA_BAIL;
         }
     }
@@ -741,8 +741,16 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             bool is_remat_x64 = T->remat_alloca &&
                                 (oty == OP_TYPE_LLVM_ALLOCA ||
                                  oty == OP_TYPE_LLVM_MLIR_UNDEF ||
+                                 oty == OP_TYPE_LLVM_MLIR_ZERO ||
+                                 oty == OP_TYPE_LLVM_MLIR_NULL ||
                                  (oty == OP_TYPE_LLVM_MLIR_ADDRESSOF && n_blocks > 64));
-            bool skip = is_c || is_remat_x64 || ra_is_folded(T, ctx, op);
+            bool is_skip_res = false;
+            if (T->remat_skip && MLIR_GetOpNumResults(ctx, op) == 1) {
+                int32_t dummy = 0;
+                if (sm_get_fast(T->remat_skip, MLIR_GetOpResult(ctx, op, 0), &dummy))
+                    is_skip_res = true;
+            }
+            bool skip = is_c || is_remat_x64 || is_skip_res || ra_is_folded(T, ctx, op);
             if (!skip) {
                 size_t nr = MLIR_GetOpNumResults(ctx, op);
                 if (nv + nr > nv_max) return RA_BAIL;
@@ -857,11 +865,26 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
         for (size_t i = 0; i < no; i++) {
             MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
             if (ra_is_folded(T, ctx, op)) { op_pos++; continue; }
+            if (T->remat_skip && MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_GEP &&
+                MLIR_GetOpNumResults(ctx, op) == 1) {
+                int32_t dmy = 0;
+                if (sm_get_fast(T->remat_skip, MLIR_GetOpResult(ctx, op, 0), &dmy)) { op_pos++; continue; }
+            }
             uint32_t up = A64_USEP(op_pos);
             size_t nop = MLIR_GetOpNumOperands(ctx, op);
             for (size_t k = 0; k < nop; k++) {
+                MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, op, k);
+                if (T->remat_skip) {
+                    int32_t dmy = 0;
+                    for (int hop = 0; hop < 4 && sm_get_fast(T->remat_skip, ov, &dmy); hop++) {
+                        MLIR_OpHandle gd = MLIR_GetValueDefiningOp(ctx, ov);
+                        if (gd != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, gd) == OP_TYPE_LLVM_GEP)
+                            ov = MLIR_GetOpOperand(ctx, gd, 0);
+                        else break;
+                    }
+                }
                 uint32_t vi;
-                if (RA_VMAP_GET(MLIR_GetOpOperand(ctx, op, k), &vi)) {
+                if (RA_VMAP_GET(ov, &vi)) {
                     if (up > last_use[vi]) last_use[vi] = up;
                     if (up < first_pos[vi]) first_pos[vi] = up;
                     weight[vi] += 1ull;
@@ -941,11 +964,26 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
             for (size_t i = 0; i < no; i++) {
                 MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, i);
                 if (ra_is_folded(T, ctx, op)) { op_pos++; continue; }
+                if (T->remat_skip && MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_GEP &&
+                    MLIR_GetOpNumResults(ctx, op) == 1) {
+                    int32_t dmy = 0;
+                    if (sm_get_fast(T->remat_skip, MLIR_GetOpResult(ctx, op, 0), &dmy)) { op_pos++; continue; }
+                }
                 uint32_t up = A64_USEP(op_pos);
                 size_t nop = MLIR_GetOpNumOperands(ctx, op);
                 for (size_t k = 0; k < nop; k++) {
+                    MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, op, k);
+                    if (T->remat_skip) {
+                        int32_t dmy = 0;
+                        for (int hop = 0; hop < 4 && sm_get_fast(T->remat_skip, ov, &dmy); hop++) {
+                            MLIR_OpHandle gd = MLIR_GetValueDefiningOp(ctx, ov);
+                            if (gd != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, gd) == OP_TYPE_LLVM_GEP)
+                                ov = MLIR_GetOpOperand(ctx, gd, 0);
+                            else break;
+                        }
+                    }
                     uint32_t vi;
-                    if (RA_VMAP_GET(MLIR_GetOpOperand(ctx, op, k), &vi))
+                    if (RA_VMAP_GET(ov, &vi))
                         RA_RECORD_USE(vi, b, up, w);
                 }
                 MLIR_ValueHandle mbase, midx;
@@ -1218,6 +1256,11 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                     for (size_t ii = no; ii-- > (size_t)fci; ) {
                         MLIR_OpHandle op = MLIR_GetBlockOp(ctx, bk, ii);
                         if (ra_is_folded(T, ctx, op)) continue;
+                        if (T->remat_skip && MLIR_GetOpType(ctx, op) == OP_TYPE_LLVM_GEP &&
+                            MLIR_GetOpNumResults(ctx, op) == 1) {
+                            int32_t dmy = 0;
+                            if (sm_get_fast(T->remat_skip, MLIR_GetOpResult(ctx, op, 0), &dmy)) continue;
+                        }
                         if (ii == (size_t)next_call_i) {
                             uint32_t rg = UINT32_MAX;
                             if (MLIR_GetOpNumResults(ctx, op)) {
@@ -1241,8 +1284,18 @@ uint32_t mlir_regalloc_global(MLIR_Context *ctx, MLIR_RegionHandle reg,
                         }
                         size_t nop = MLIR_GetOpNumOperands(ctx, op);
                         for (size_t k = 0; k < nop; k++) {
+                            MLIR_ValueHandle ov = MLIR_GetOpOperand(ctx, op, k);
+                            if (T->remat_skip) {
+                                int32_t dmy = 0;
+                                for (int hop = 0; hop < 4 && sm_get_fast(T->remat_skip, ov, &dmy); hop++) {
+                                    MLIR_OpHandle gd = MLIR_GetValueDefiningOp(ctx, ov);
+                                    if (gd != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, gd) == OP_TYPE_LLVM_GEP)
+                                        ov = MLIR_GetOpOperand(ctx, gd, 0);
+                                    else break;
+                                }
+                            }
                             uint32_t vi;
-                            if (RA_VMAP_GET(MLIR_GetOpOperand(ctx, op, k), &vi) &&
+                            if (RA_VMAP_GET(ov, &vi) &&
                                 glob_id[vi] != UINT32_MAX) a64_bs_set(live_g, glob_id[vi]);
                         }
                         MLIR_ValueHandle mbase, midx;
