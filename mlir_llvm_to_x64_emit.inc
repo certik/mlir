@@ -1336,6 +1336,30 @@ static void lower_op(FnCtx *F, MLIR_OpHandle op, SymSet *refs) {
                     store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
                 return;
             }
+            // Inline memcpy/base_memcpy -> rep movsb and memset/base_memset -> rep stosb at -O2.
+            // Safe w.r.t. regalloc because llvm.call already clobbers all caller-saved regs.
+            if (g_x64_opt_level >= 2 && !F->wasm_lifted && no == 3) {
+                if (str_eqz(callee, "memcpy") || str_eqz(callee, "base_memcpy")) {
+                    emit_parallel_arg_moves(F, op, 0, 3);    // RDI=dst, RSI=src, RDX=n
+                    mov_rr(F, RAX, RDI, 1);                  // return original dst
+                    mov_rr(F, RCX, RDX, 1);                  // count = n
+                    x64_emit0(F, OP_TYPE_X64_REP_MOVSB);
+                    if (MLIR_GetOpNumResults(ctx, op) == 1)
+                        store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
+                    return;
+                }
+                if (str_eqz(callee, "memset") || str_eqz(callee, "base_memset")) {
+                    emit_parallel_arg_moves(F, op, 0, 3);    // RDI=dst, RSI=c, RDX=n
+                    mov_rr(F, R11, RDI, 1);                  // save original dst
+                    mov_rr(F, RAX, RSI, 0);                  // fill byte in AL
+                    mov_rr(F, RCX, RDX, 1);                  // count = n
+                    x64_emit0(F, OP_TYPE_X64_REP_STOSB);
+                    mov_rr(F, RAX, R11, 1);                  // return original dst
+                    if (MLIR_GetOpNumResults(ctx, op) == 1)
+                        store_val(F, MLIR_GetOpResult(ctx, op, 0), RAX);
+                    return;
+                }
+            }
         }
         size_t arg_base = is_indirect ? 1 : 0;
         if (is_indirect)
@@ -2800,6 +2824,10 @@ static void x64_encode_block(FnCtx *F, MLIR_BlockHandle blk, size_t n_labels) {
         }
         case OP_TYPE_X64_REP_STOSB: {
             eb(F, 0xF3); eb(F, 0xAA);
+            break;
+        }
+        case OP_TYPE_X64_REP_MOVSB: {
+            eb(F, 0xF3); eb(F, 0xA4);
             break;
         }
         case OP_TYPE_X64_SUB_RSP: {

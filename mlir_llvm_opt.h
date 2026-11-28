@@ -24,6 +24,9 @@ void mlir_llvm_simplify_cfg(MLIR_Context *ctx, MLIR_OpHandle module);
 // Constant folding, algebraic identities, and constant-condition branch folding.
 void mlir_llvm_constfold(MLIR_Context *ctx, MLIR_OpHandle module);
 
+// Exact-trip-count loop unroller (complete unroll <= 8, 4x unroll for trip % 4 == 0).
+void mlir_llvm_unroll(MLIR_Context *ctx, MLIR_OpHandle module);
+
 #ifdef __cplusplus
 }
 #endif
