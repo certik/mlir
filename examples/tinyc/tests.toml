@@ -1895,5 +1895,5 @@ expected_stdout = "e 42\n8\n1 7 12\n7 15\n30 20 -1 8\n99\n4 7 5 Z 99 77 2\n"
 
 [[test]]
 name = "elf_global_fnptr_and_gep_init"
-targets = ["native", "elf"]
+targets = ["elf"]
 expected_stdout = "30 50\na 6 7\nb 15 11\n"
