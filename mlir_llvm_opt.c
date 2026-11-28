@@ -351,6 +351,196 @@ static void licm_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
             }
             if (!moved_any) break;
         }
+        // Loop-invariant memory accumulator scalar promotion (e.g. `C[i*N+j] = 0; for (k) C[i*N+j] += A[...]*B[...];`):
+        // Promotes read-modify-write accumulators in simple 2-block inner loops into a
+        // register-resident SSA block arg, eliminating the 5-cycle store-forwarding chain.
+        {
+            size_t loop_cnt = 0, body = nb;
+            for (size_t b = 0; b < nb; b++) {
+                if (!in_loop_blk[b]) continue;
+                loop_cnt++;
+                if (b != hdr) body = b;
+            }
+            if (loop_cnt == 2 && body < nb) {
+                size_t hdr_no = MLIR_GetBlockNumOps(ctx, blks[hdr]);
+                size_t body_no = MLIR_GetBlockNumOps(ctx, blks[body]);
+                MLIR_OpHandle hdr_term = hdr_no ? MLIR_GetBlockOp(ctx, blks[hdr], hdr_no - 1) : MLIR_INVALID_HANDLE;
+                MLIR_OpHandle body_term = body_no ? MLIR_GetBlockOp(ctx, blks[body], body_no - 1) : MLIR_INVALID_HANDLE;
+                if (hdr_term != MLIR_INVALID_HANDLE && body_term != MLIR_INVALID_HANDLE &&
+                    MLIR_GetOpType(ctx, hdr_term) == OP_TYPE_LLVM_COND_BR &&
+                    MLIR_GetOpType(ctx, body_term) == OP_TYPE_LLVM_BR &&
+                    MLIR_GetOpSuccessor(ctx, body_term, 0) == blks[hdr] &&
+                    MLIR_GetOpSuccessor(ctx, hdr_term, 0) == blks[body]) {
+                    MLIR_BlockHandle exit_bh = MLIR_GetOpSuccessor(ctx, hdr_term, 1);
+                    size_t exit_b = nb;
+                    {
+                        uintptr_t ek = (uintptr_t)exit_bh;
+                        size_t es = (ek * 1099511628211ull) & bhmask;
+                        while (bhk[es]) { if (bhk[es] == ek) { exit_b = bhv[es]; break; } es = (es + 1) & bhmask; }
+                    }
+                    // Require unique exit dominated by hdr (pred_cnt[exit_b] == 1).
+                    if (exit_b < nb && !in_loop_blk[exit_b] &&
+                        pred_off[exit_b + 1] - pred_off[exit_b] == 1 &&
+                        preds[pred_off[exit_b]] == hdr) {
+                        bool ok = true;
+                        // Header must have no calls or stores.
+                        for (size_t i = 0; i < hdr_no; i++) {
+                            MLIR_OpType ot = MLIR_GetOpType(ctx, MLIR_GetBlockOp(ctx, blks[hdr], i));
+                            if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL ||
+                                ot == OP_TYPE_LLVM_STORE || ot == OP_TYPE_LLVM_LOAD) { ok = false; break; }
+                        }
+                        // Find the single store in `body` to a loop-invariant pointer.
+                        MLIR_OpHandle st_op = MLIR_INVALID_HANDLE;
+                        size_t st_idx = 0;
+                        for (size_t i = 0; i < body_no && ok; i++) {
+                            MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blks[body], i);
+                            MLIR_OpType ot = MLIR_GetOpType(ctx, op);
+                            if (ot == OP_TYPE_LLVM_CALL || ot == OP_TYPE_FUNC_CALL) { ok = false; break; }
+                            if (ot == OP_TYPE_LLVM_STORE) {
+                                if (st_op != MLIR_INVALID_HANDLE) { ok = false; break; }
+                                st_op = op; st_idx = i;
+                            }
+                        }
+                        if (ok && st_op != MLIR_INVALID_HANDLE) {
+                            MLIR_ValueHandle st_val = MLIR_GetOpOperand(ctx, st_op, 0);
+                            MLIR_ValueHandle acc_ptr = MLIR_GetOpOperand(ctx, st_op, 1);
+                            MLIR_TypeHandle acc_ty = MLIR_GetValueType(ctx, st_val);
+                            MLIR_TypeKind ak = MLIR_GetTypeKind(ctx, acc_ty);
+                            bool acc_scalar = (ak == MLIR_TYPE_KIND_INTEGER && MLIR_GetTypeWidth(ctx, acc_ty) >= 16);
+                            if (acc_scalar && !vset_has(&in_loop, acc_ptr)) {
+                                // Check all loads in `body`: either matching `load(acc_ptr)` before `st_op`,
+                                // or a non-byte load of a strictly different type (C TBAA non-aliasing).
+                                MLIR_OpHandle acc_loads[8];
+                                size_t n_acc_loads = 0;
+                                for (size_t i = 0; i < body_no && ok; i++) {
+                                    MLIR_OpHandle op = MLIR_GetBlockOp(ctx, blks[body], i);
+                                    if (MLIR_GetOpType(ctx, op) != OP_TYPE_LLVM_LOAD) continue;
+                                    MLIR_ValueHandle lp = MLIR_GetOpOperand(ctx, op, 0);
+                                    MLIR_TypeHandle lt = MLIR_GetValueType(ctx, MLIR_GetOpResult(ctx, op, 0));
+                                    if (lp == acc_ptr) {
+                                        if (lt != acc_ty || i >= st_idx || n_acc_loads >= 8) { ok = false; break; }
+                                        acc_loads[n_acc_loads++] = op;
+                                    } else {
+                                        // Must be a different non-byte type (char* may alias anything).
+                                        if (lt == acc_ty) { ok = false; break; }
+                                        if (MLIR_GetTypeKind(ctx, lt) == MLIR_TYPE_KIND_INTEGER &&
+                                            MLIR_GetTypeWidth(ctx, lt) <= 8) { ok = false; break; }
+                                    }
+                                }
+                                // Helper: check if two pointers are the same SSA value or identical GEPs.
+                                // Require a dominating store to `acc_ptr` in `pre` (with no calls/other stores after it)
+                                // so `acc_ptr` is provably valid/writable even if the loop executes 0 times.
+                                MLIR_OpHandle pre_st = MLIR_INVALID_HANDLE;
+                                if (ok && n_acc_loads > 0) {
+                                    MLIR_OpHandle g_acc = MLIR_GetValueDefiningOp(ctx, acc_ptr);
+                                    size_t pno = MLIR_GetBlockNumOps(ctx, blks[pre]);
+                                    for (size_t pi = pno; pi-- > 0; ) {
+                                        MLIR_OpHandle pop = MLIR_GetBlockOp(ctx, blks[pre], pi);
+                                        MLIR_OpType pot = MLIR_GetOpType(ctx, pop);
+                                        if (pot == OP_TYPE_LLVM_STORE) {
+                                            MLIR_ValueHandle pp = MLIR_GetOpOperand(ctx, pop, 1);
+                                            bool same_p = (pp == acc_ptr);
+                                            if (!same_p && g_acc != MLIR_INVALID_HANDLE &&
+                                                MLIR_GetOpType(ctx, g_acc) == OP_TYPE_LLVM_GEP) {
+                                                MLIR_OpHandle g_pp = MLIR_GetValueDefiningOp(ctx, pp);
+                                                if (g_pp != MLIR_INVALID_HANDLE &&
+                                                    MLIR_GetOpType(ctx, g_pp) == OP_TYPE_LLVM_GEP &&
+                                                    MLIR_GetOpNumOperands(ctx, g_pp) == MLIR_GetOpNumOperands(ctx, g_acc)) {
+                                                    same_p = true;
+                                                    for (size_t k = 0; k < MLIR_GetOpNumOperands(ctx, g_acc); k++) {
+                                                        if (MLIR_GetOpOperand(ctx, g_pp, k) != MLIR_GetOpOperand(ctx, g_acc, k)) {
+                                                            same_p = false; break;
+                                                        }
+                                                    }
+                                                    if (same_p) {
+                                                        MLIR_AttributeHandle e1 = MLIR_GetOpAttr(ctx, g_pp, MLIR_KEY_ELEM_TYPE);
+                                                        MLIR_AttributeHandle e2 = MLIR_GetOpAttr(ctx, g_acc, MLIR_KEY_ELEM_TYPE);
+                                                        if (e1 == MLIR_INVALID_HANDLE || e2 == MLIR_INVALID_HANDLE ||
+                                                            MLIR_GetAttributeTypeValue(ctx, e1) != MLIR_GetAttributeTypeValue(ctx, e2))
+                                                            same_p = false;
+                                                    }
+                                                    if (same_p) {
+                                                        MLIR_AttributeHandle r1 = MLIR_GetOpAttr(ctx, g_pp, MLIR_KEY_RAW_CONSTANT_INDICES);
+                                                        MLIR_AttributeHandle r2 = MLIR_GetOpAttr(ctx, g_acc, MLIR_KEY_RAW_CONSTANT_INDICES);
+                                                        if (r1 != MLIR_INVALID_HANDLE && r2 != MLIR_INVALID_HANDLE) {
+                                                            int32_t c1[16], c2[16];
+                                                            size_t n1 = MLIR_GetAttributeDenseI32(ctx, r1, c1, 16);
+                                                            size_t n2 = MLIR_GetAttributeDenseI32(ctx, r2, c2, 16);
+                                                            if (n1 == 0 || n1 != n2) same_p = false;
+                                                            else {
+                                                                for (size_t k = 0; k < n1; k++)
+                                                                    if (c1[k] != c2[k]) { same_p = false; break; }
+                                                            }
+                                                        } else if (r1 != r2) {
+                                                            same_p = false;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if (same_p &&
+                                                MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, pop, 0)) == acc_ty) {
+                                                pre_st = pop;
+                                            }
+                                            break;
+                                        }
+                                        if (pot == OP_TYPE_LLVM_CALL || pot == OP_TYPE_FUNC_CALL) break;
+                                    }
+                                }
+                                if (ok && pre_st != MLIR_INVALID_HANDLE) {
+                                    MLIR_ValueHandle init_val = MLIR_GetOpOperand(ctx, pre_st, 0);
+                                    MLIR_ValueHandle acc_phi = MLIR_AddBlockArgument(ctx, blks[hdr], acc_ty, MLIR_INVALID_HANDLE);
+                                    // Append init_val to pre_term -> hdr
+                                    {
+                                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, pre_term, 0);
+                                        MLIR_ValueHandle *vals = (MLIR_ValueHandle *)malloc((nso + 1) * sizeof(MLIR_ValueHandle));
+                                        for (size_t k = 0; k < nso; k++) vals[k] = MLIR_GetOpSuccessorOperand(ctx, pre_term, 0, k);
+                                        vals[nso] = init_val;
+                                        MLIR_SetOpSuccessorOperands(ctx, pre_term, 0, vals, nso + 1);
+                                        free(vals);
+                                    }
+                                    // Append st_val to body_term -> hdr
+                                    {
+                                        size_t nso = MLIR_GetOpNumSuccessorOperands(ctx, body_term, 0);
+                                        MLIR_ValueHandle *vals = (MLIR_ValueHandle *)malloc((nso + 1) * sizeof(MLIR_ValueHandle));
+                                        for (size_t k = 0; k < nso; k++) vals[k] = MLIR_GetOpSuccessorOperand(ctx, body_term, 0, k);
+                                        vals[nso] = st_val;
+                                        MLIR_SetOpSuccessorOperands(ctx, body_term, 0, vals, nso + 1);
+                                        free(vals);
+                                    }
+                                    // Replace all `load(acc_ptr)` in `body` with `acc_phi` and detach them.
+                                    for (size_t li = 0; li < n_acc_loads; li++) {
+                                        MLIR_ValueHandle lv = MLIR_GetOpResult(ctx, acc_loads[li], 0);
+                                        MLIR_ReplaceAllUsesOfValue(ctx, lv, acc_phi);
+                                        // Also sweep `body` directly in case def-use tracking is off.
+                                        size_t bno_cur = MLIR_GetBlockNumOps(ctx, blks[body]);
+                                        for (size_t bi = 0; bi < bno_cur; bi++) {
+                                            MLIR_OpHandle bop = MLIR_GetBlockOp(ctx, blks[body], bi);
+                                            size_t bnop = MLIR_GetOpNumOperands(ctx, bop);
+                                            for (size_t k = 0; k < bnop; k++)
+                                                if (MLIR_GetOpOperand(ctx, bop, k) == lv)
+                                                    MLIR_SetOpOperand(ctx, bop, k, acc_phi);
+                                        }
+                                        MLIR_DetachOp(ctx, acc_loads[li]);
+                                    }
+                                    // Insert final `store acc_phi, acc_ptr` at entry of `exit_bh`.
+                                    MLIR_ValueHandle st_ops[2] = { acc_phi, acc_ptr };
+                                    MLIR_OpSpec sp;
+                                    memset(&sp, 0, sizeof(sp));
+                                    sp.type = OP_TYPE_LLVM_STORE;
+                                    sp.operands = st_ops;
+                                    sp.n_operands = 2;
+                                    MLIR_OpHandle ex_st = MLIR_CreateOpFromSpec(ctx, &sp);
+                                    MLIR_InsertBlockOpAtIndex(ctx, exit_bh, ex_st, 0);
+                                    // Detach body store and preheader store.
+                                    MLIR_DetachOp(ctx, st_op);
+                                    MLIR_DetachOp(ctx, pre_st);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         vset_free(&in_loop);
     }
 
@@ -1860,11 +2050,35 @@ static MLIR_ValueHandle cf_make_int_const(MLIR_Context *ctx, MLIR_BlockHandle bk
     return MLIR_GetOpResult(ctx, c, 0);
 }
 
+static MLIR_ValueHandle cf_unwrap_bool_i1(MLIR_Context *ctx, MLIR_ValueHandle v) {
+    MLIR_OpHandle d = MLIR_GetValueDefiningOp(ctx, v);
+    if (d == MLIR_INVALID_HANDLE) return MLIR_INVALID_HANDLE;
+    MLIR_OpType dt = MLIR_GetOpType(ctx, d);
+    if (dt == OP_TYPE_LLVM_ZEXT) {
+        MLIR_ValueHandle bv = MLIR_GetOpOperand(ctx, d, 0);
+        MLIR_TypeHandle bty = MLIR_GetValueType(ctx, bv);
+        if (MLIR_GetTypeKind(ctx, bty) == MLIR_TYPE_KIND_INTEGER &&
+            MLIR_GetTypeWidth(ctx, bty) == 1)
+            return bv;
+    } else if (dt == OP_TYPE_LLVM_SELECT && MLIR_GetOpNumOperands(ctx, d) == 3) {
+        int64_t vt = 0, vf = 0;
+        if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d, 1), &vt, NULL) && vt == 1 &&
+            cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d, 2), &vf, NULL) && vf == 0) {
+            MLIR_ValueHandle bv = MLIR_GetOpOperand(ctx, d, 0);
+            MLIR_TypeHandle bty = MLIR_GetValueType(ctx, bv);
+            if (MLIR_GetTypeKind(ctx, bty) == MLIR_TYPE_KIND_INTEGER &&
+                MLIR_GetTypeWidth(ctx, bty) == 1)
+                return bv;
+        }
+    }
+    return MLIR_INVALID_HANDLE;
+}
+
 static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
     if (MLIR_GetOpNumRegions(ctx, fn) == 0) return;
     MLIR_RegionHandle reg = MLIR_GetOpRegion(ctx, fn, 0);
     size_t nb = MLIR_GetRegionNumBlocks(ctx, reg);
-    for (int round = 0; round < 2; round++) {
+    for (int round = 0; round < 4; round++) {
         bool changed = false;
         for (size_t b = 0; b < nb; b++) {
             MLIR_BlockHandle bk = MLIR_GetRegionBlock(ctx, reg, b);
@@ -1960,6 +2174,97 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                         MLIR_InsertBlockOpAtIndex(ctx, bk, nxt, i);
                         i += 2;
                         continue;
+                    }
+                }
+
+                // GEP `trunc i64 X to i32` -> `i64 X` when X is a non-negative i64
+                // loop IV bounded by `<= INT32_MAX` (e.g. sieve inner loop).
+                if (ot == OP_TYPE_LLVM_GEP && MLIR_GetOpNumOperands(ctx, op) == 2) {
+                    MLIR_ValueHandle iv = MLIR_GetOpOperand(ctx, op, 1);
+                    MLIR_OpHandle tr = MLIR_GetValueDefiningOp(ctx, iv);
+                    if (tr != MLIR_INVALID_HANDLE && MLIR_GetOpType(ctx, tr) == OP_TYPE_LLVM_TRUNC &&
+                        MLIR_GetTypeKind(ctx, MLIR_GetValueType(ctx, iv)) == MLIR_TYPE_KIND_INTEGER &&
+                        MLIR_GetTypeWidth(ctx, MLIR_GetValueType(ctx, iv)) == 32) {
+                        MLIR_ValueHandle xv = MLIR_GetOpOperand(ctx, tr, 0);
+                        MLIR_TypeHandle xty = MLIR_GetValueType(ctx, xv);
+                        if (MLIR_GetTypeKind(ctx, xty) == MLIR_TYPE_KIND_INTEGER &&
+                            MLIR_GetTypeWidth(ctx, xty) == 64 &&
+                            MLIR_GetValueDefiningOp(ctx, xv) == MLIR_INVALID_HANDLE) {
+                            // Verify `xv` is a block arg of a single-predecessor header `hdr`
+                            // that branches to `bk` on `icmp sle/slt xv, C` (0 <= C <= INT32_MAX)
+                            // with non-negative init and non-negative step.
+                            for (size_t hb = 0; hb < nb; hb++) {
+                                MLIR_BlockHandle hbk = MLIR_GetRegionBlock(ctx, reg, hb);
+                                size_t hna = MLIR_GetBlockNumArgs(ctx, hbk);
+                                int arg_k = -1;
+                                for (size_t a = 0; a < hna; a++)
+                                    if (MLIR_GetBlockArg(ctx, hbk, a) == xv) { arg_k = (int)a; break; }
+                                if (arg_k < 0) continue;
+                                size_t hno = MLIR_GetBlockNumOps(ctx, hbk);
+                                if (hno < 2) break;
+                                MLIR_OpHandle hterm = MLIR_GetBlockOp(ctx, hbk, hno - 1);
+                                if (MLIR_GetOpType(ctx, hterm) != OP_TYPE_LLVM_COND_BR ||
+                                    MLIR_GetOpSuccessor(ctx, hterm, 0) != bk) break;
+                                MLIR_OpHandle hicmp = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, hterm, 0));
+                                if (hicmp == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, hicmp) != OP_TYPE_LLVM_ICMP) break;
+                                MLIR_AttributeHandle hpa = MLIR_GetOpAttr(ctx, hicmp, MLIR_KEY_PREDICATE);
+                                int64_t hpred = hpa ? MLIR_GetAttributeInteger(ctx, hpa) : -1;
+                                int64_t lim = 0;
+                                if ((hpred != 2 && hpred != 3) ||
+                                    MLIR_GetOpOperand(ctx, hicmp, 0) != xv ||
+                                    !cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, hicmp, 1), &lim, NULL) ||
+                                    lim < 0 || lim > 0x7fffffffll) break;
+                                // Check all incoming values to (hbk, arg_k) are non-negative or `add(xv, nonneg)`.
+                                bool all_ok = true;
+                                for (size_t pb = 0; pb < nb && all_ok; pb++) {
+                                    MLIR_BlockHandle pbk = MLIR_GetRegionBlock(ctx, reg, pb);
+                                    size_t pno = MLIR_GetBlockNumOps(ctx, pbk);
+                                    if (pno == 0) continue;
+                                    MLIR_OpHandle pterm = MLIR_GetBlockOp(ctx, pbk, pno - 1);
+                                    size_t pns = MLIR_GetOpNumSuccessors(ctx, pterm);
+                                    for (size_t ps = 0; ps < pns && all_ok; ps++) {
+                                        if (MLIR_GetOpSuccessor(ctx, pterm, ps) != hbk) continue;
+                                        if ((size_t)arg_k >= MLIR_GetOpNumSuccessorOperands(ctx, pterm, ps)) { all_ok = false; break; }
+                                        MLIR_ValueHandle inc = MLIR_GetOpSuccessorOperand(ctx, pterm, ps, (size_t)arg_k);
+                                        int64_t ic = 0;
+                                        if (cf_get_int_const(ctx, inc, &ic, NULL)) {
+                                            if (ic < 0 || ic > 0x7fffffffll) all_ok = false;
+                                            continue;
+                                        }
+                                        MLIR_OpHandle id = MLIR_GetValueDefiningOp(ctx, inc);
+                                        if (id == MLIR_INVALID_HANDLE) { all_ok = false; break; }
+                                        MLIR_OpType idt = MLIR_GetOpType(ctx, id);
+                                        if (idt == OP_TYPE_LLVM_MUL &&
+                                            MLIR_GetOpOperand(ctx, id, 0) == MLIR_GetOpOperand(ctx, id, 1)) {
+                                            // x*x >= 0 (provided no i64 overflow; sext(i32)^2 <= 2^62)
+                                            MLIR_OpHandle sd = MLIR_GetValueDefiningOp(ctx, MLIR_GetOpOperand(ctx, id, 0));
+                                            if (sd == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, sd) != OP_TYPE_LLVM_SEXT ||
+                                                MLIR_GetTypeWidth(ctx, MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, sd, 0))) > 32)
+                                                all_ok = false;
+                                        } else if (idt == OP_TYPE_LLVM_ADD && MLIR_GetOpOperand(ctx, id, 0) == xv) {
+                                            MLIR_ValueHandle step = MLIR_GetOpOperand(ctx, id, 1);
+                                            int64_t sc = 0;
+                                            if (cf_get_int_const(ctx, step, &sc, NULL)) {
+                                                if (sc < 0 || sc > 0x7fffffffll) all_ok = false;
+                                            } else {
+                                                MLIR_OpHandle sd = MLIR_GetValueDefiningOp(ctx, step);
+                                                // Accept `sext i32` when the same `sext` was squared for init (e.g. sieve `i*i` + `i`)
+                                                if (sd == MLIR_INVALID_HANDLE || MLIR_GetOpType(ctx, sd) != OP_TYPE_LLVM_SEXT ||
+                                                    MLIR_GetTypeWidth(ctx, MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, sd, 0))) > 32)
+                                                    all_ok = false;
+                                            }
+                                        } else {
+                                            all_ok = false;
+                                        }
+                                    }
+                                }
+                                if (all_ok) {
+                                    MLIR_SetOpOperand(ctx, op, 1, xv);
+                                    changed = true;
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -2078,6 +2383,156 @@ static void constfold_func(MLIR_Context *ctx, MLIR_OpHandle fn) {
                         if (ot == OP_TYPE_LLVM_SUB || ot == OP_TYPE_LLVM_XOR) repl_zero = true;
                         else if (ot == OP_TYPE_LLVM_AND || ot == OP_TYPE_LLVM_OR) repl = a0;
                     }
+                    // Redundant mask elimination:
+                    //   and(zext(iW), C) / and(select(i1, 1, 0), C) -> a0 when C covers all low bits
+                    //   and(and(x, C1), C2) -> and(x, C1) when (C1 & C2) == C1
+                    if (ot == OP_TYPE_LLVM_AND && k1 && rw > 0 && rw <= 64) {
+                        uint64_t m1 = (uint64_t)cf_mask(c1, rw);
+                        if ((m1 & 1ull) && cf_unwrap_bool_i1(ctx, a0) != MLIR_INVALID_HANDLE) {
+                            repl = a0;
+                        } else {
+                            MLIR_OpHandle d0 = MLIR_GetValueDefiningOp(ctx, a0);
+                            if (d0 != MLIR_INVALID_HANDLE) {
+                                MLIR_OpType d0t = MLIR_GetOpType(ctx, d0);
+                                if (d0t == OP_TYPE_LLVM_ZEXT) {
+                                    MLIR_TypeHandle sty = MLIR_GetValueType(ctx, MLIR_GetOpOperand(ctx, d0, 0));
+                                    if (MLIR_GetTypeKind(ctx, sty) == MLIR_TYPE_KIND_INTEGER) {
+                                        uint32_t sw = MLIR_GetTypeWidth(ctx, sty);
+                                        if (sw > 0 && sw < rw) {
+                                            uint64_t sm = (1ull << sw) - 1ull;
+                                            if ((m1 & sm) == sm) repl = a0;
+                                        }
+                                    }
+                                } else if (d0t == OP_TYPE_LLVM_AND && MLIR_GetOpNumOperands(ctx, d0) == 2) {
+                                    int64_t ic = 0;
+                                    if (cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d0, 1), &ic, NULL)) {
+                                        uint64_t m0 = (uint64_t)cf_mask(ic, rw);
+                                        if ((m0 & m1) == m0) repl = a0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Boolean round-trip elimination:
+                    //   icmp ne (zext/select i1 %b to iW), 0 -> %b
+                    //   icmp eq (zext/select i1 %b to iW), 1 -> %b
+                    if (ot == OP_TYPE_LLVM_ICMP && k1 && rw == 1) {
+                        MLIR_AttributeHandle pa = MLIR_GetOpAttr(ctx, op, MLIR_KEY_PREDICATE);
+                        int64_t pred = pa ? MLIR_GetAttributeInteger(ctx, pa) : -1;
+                        if ((pred == 1 /*ne*/ && c1 == 0) || (pred == 0 /*eq*/ && c1 == 1)) {
+                            MLIR_ValueHandle bv = cf_unwrap_bool_i1(ctx, a0);
+                            if (bv != MLIR_INVALID_HANDLE) repl = bv;
+                        }
+                    }
+
+                    // Range-check folding:
+                    //   and(bool(icmp sge/uge x, LO), bool(icmp sle/ule x, HI))
+                    //     -> zext(icmp ule (sub x, LO), (HI - LO))
+                    //   (also handles direct i1 `and(icmp, icmp)` -> `icmp ule`).
+                    // Turns e.g. CoreMark's `ee_isdigit(c)` from 15 insns into 3 insns!
+                    if (ot == OP_TYPE_LLVM_AND && repl == MLIR_INVALID_HANDLE && !repl_zero &&
+                        (rw == 1 || rw == 32 || rw == 64)) {
+                        MLIR_OpHandle d0 = MLIR_INVALID_HANDLE, d1 = MLIR_INVALID_HANDLE;
+                        bool wrap_zext = (rw > 1);
+                        if (wrap_zext) {
+                            MLIR_ValueHandle b0 = cf_unwrap_bool_i1(ctx, a0);
+                            MLIR_ValueHandle b1 = cf_unwrap_bool_i1(ctx, a1);
+                            if (b0 != MLIR_INVALID_HANDLE && b1 != MLIR_INVALID_HANDLE) {
+                                d0 = MLIR_GetValueDefiningOp(ctx, b0);
+                                d1 = MLIR_GetValueDefiningOp(ctx, b1);
+                            }
+                        } else {
+                            d0 = MLIR_GetValueDefiningOp(ctx, a0);
+                            d1 = MLIR_GetValueDefiningOp(ctx, a1);
+                        }
+                        if (d0 != MLIR_INVALID_HANDLE && d1 != MLIR_INVALID_HANDLE &&
+                            MLIR_GetOpType(ctx, d0) == OP_TYPE_LLVM_ICMP &&
+                            MLIR_GetOpType(ctx, d1) == OP_TYPE_LLVM_ICMP) {
+                            MLIR_ValueHandle x0 = MLIR_GetOpOperand(ctx, d0, 0);
+                            MLIR_ValueHandle x1 = MLIR_GetOpOperand(ctx, d1, 0);
+                            int64_t k_lo = 0, k_hi = 0; uint32_t xw = 0;
+                            if (x0 == x1 &&
+                                cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d0, 1), &k_lo, &xw) &&
+                                cf_get_int_const(ctx, MLIR_GetOpOperand(ctx, d1, 1), &k_hi, NULL) &&
+                                (xw == 32 || xw == 64)) {
+                                MLIR_AttributeHandle pa0 = MLIR_GetOpAttr(ctx, d0, MLIR_KEY_PREDICATE);
+                                MLIR_AttributeHandle pa1 = MLIR_GetOpAttr(ctx, d1, MLIR_KEY_PREDICATE);
+                                int64_t p0 = pa0 ? MLIR_GetAttributeInteger(ctx, pa0) : -1;
+                                int64_t p1 = pa1 ? MLIR_GetAttributeInteger(ctx, pa1) : -1;
+                                // Canonicalize so (p0, k_lo) is the lower bound and (p1, k_hi) is the upper bound.
+                                if ((p0 == 3 || p0 == 7) && (p1 == 5 || p1 == 9)) {
+                                    int64_t tp = p0; p0 = p1; p1 = tp;
+                                    int64_t tk = k_lo; k_lo = k_hi; k_hi = tk;
+                                }
+                                bool is_signed = (p0 == 5 /*sge*/ && p1 == 3 /*sle*/);
+                                bool is_unsigned = (p0 == 9 /*uge*/ && p1 == 7 /*ule*/);
+                                bool range_ok = false;
+                                uint64_t diff = 0;
+                                if (is_signed) {
+                                    int64_t slo = cf_sext(k_lo, xw), shi = cf_sext(k_hi, xw);
+                                    if (slo <= shi) {
+                                        diff = (uint64_t)shi - (uint64_t)slo;
+                                        range_ok = (xw == 64) ? (diff < (1ull << 63)) : (diff < (1ull << 31));
+                                    }
+                                } else if (is_unsigned) {
+                                    uint64_t ulo = (uint64_t)cf_mask(k_lo, xw), uhi = (uint64_t)cf_mask(k_hi, xw);
+                                    if (ulo <= uhi) {
+                                        diff = uhi - ulo;
+                                        range_ok = true;
+                                    }
+                                }
+                                if (range_ok) {
+                                    MLIR_TypeHandle xty = MLIR_GetValueType(ctx, x0);
+                                    MLIR_ValueHandle sub_v = x0;
+                                    if (cf_mask(k_lo, xw) != 0) {
+                                        MLIR_ValueHandle lo_c = cf_make_int_const(ctx, bk, i, xty, cf_mask(k_lo, xw));
+                                        i++;
+                                        MLIR_ValueHandle sops[2] = { x0, lo_c };
+                                        MLIR_OpSpec ssp; memset(&ssp, 0, sizeof(ssp));
+                                        ssp.type = OP_TYPE_LLVM_SUB;
+                                        ssp.operands = sops; ssp.n_operands = 2;
+                                        ssp.result_types = &xty; ssp.n_results = 1;
+                                        MLIR_OpHandle sop = MLIR_CreateOpFromSpec(ctx, &ssp);
+                                        MLIR_InsertBlockOpAtIndex(ctx, bk, sop, i);
+                                        i++;
+                                        sub_v = MLIR_GetOpResult(ctx, sop, 0);
+                                    }
+                                    MLIR_ValueHandle diff_c = cf_make_int_const(ctx, bk, i, xty, cf_mask((int64_t)diff, xw));
+                                    i++;
+                                    MLIR_TypeHandle i1ty = MLIR_CreateTypeInteger(ctx, 1, false);
+                                    MLIR_TypeHandle i64ty = MLIR_CreateTypeInteger(ctx, 64, false);
+                                    MLIR_NamedAttr pattr = MLIR_Named(MLIR_KEY_PREDICATE, MLIR_CreateAttributeInteger(ctx, 7 /*ule*/, i64ty));
+                                    MLIR_ValueHandle cops[2] = { sub_v, diff_c };
+                                    MLIR_OpSpec csp; memset(&csp, 0, sizeof(csp));
+                                    csp.type = OP_TYPE_LLVM_ICMP;
+                                    csp.operands = cops; csp.n_operands = 2;
+                                    csp.result_types = &i1ty; csp.n_results = 1;
+                                    csp.attrs = &pattr; csp.n_attrs = 1;
+                                    MLIR_OpHandle cop = MLIR_CreateOpFromSpec(ctx, &csp);
+                                    MLIR_InsertBlockOpAtIndex(ctx, bk, cop, i);
+                                    i++;
+                                    MLIR_ValueHandle cmp_v = MLIR_GetOpResult(ctx, cop, 0);
+                                    MLIR_ValueHandle out_v = cmp_v;
+                                    if (wrap_zext) {
+                                        MLIR_OpSpec zsp; memset(&zsp, 0, sizeof(zsp));
+                                        zsp.type = OP_TYPE_LLVM_ZEXT;
+                                        zsp.operands = &cmp_v; zsp.n_operands = 1;
+                                        zsp.result_types = &rty; zsp.n_results = 1;
+                                        MLIR_OpHandle zop = MLIR_CreateOpFromSpec(ctx, &zsp);
+                                        MLIR_InsertBlockOpAtIndex(ctx, bk, zop, i);
+                                        i++;
+                                        out_v = MLIR_GetOpResult(ctx, zop, 0);
+                                    }
+                                    MLIR_ReplaceAllUsesOfValue(ctx, res, out_v);
+                                    MLIR_DetachOp(ctx, op);
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     if (repl_zero) {
                         MLIR_ValueHandle nv = cf_make_int_const(ctx, bk, i, rty, 0);
                         MLIR_ReplaceAllUsesOfValue(ctx, res, nv);
