@@ -4401,8 +4401,7 @@ static void emit_func_to_x64(MLIR_Context *ctx, MLIR_OpHandle fn, ObjFunc *f,
                     string cn = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE));
                     if (!cn.size) cn = strip_at(attr_str(ctx, op, MLIR_KEY_CALLEE_NAME));
                     size_t nargs = MLIR_GetOpNumOperands(ctx, op) - (cn.size == 0 ? 1 : 0);
-                    if (nargs > 6 || str_eqz(cn, "__tinyc_syscall6") ||
-                        MLIR_GetOpAttr(ctx, op, MLIR_KEY_VAR_CALLEE_TYPE) != MLIR_INVALID_HANDLE)
+                    if (nargs > 6 || str_eqz(cn, "__tinyc_syscall6"))
                         fn_can_rsp_frame = false;
                 }
             }
